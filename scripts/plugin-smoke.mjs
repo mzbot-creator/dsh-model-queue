@@ -30,6 +30,20 @@ function fail(message) {
   process.exit(1)
 }
 
+/** Find one free TCP port on the loopback interface. */
+async function freePort() {
+  const { createServer } = await import('node:net')
+  return await new Promise((resolve, reject) => {
+    const server = createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      const port = typeof address === 'object' && address !== null ? address.port : 0
+      server.close(() => { resolve(port) })
+    })
+  })
+}
+
 /** Run one dsh command synchronously and return its trimmed stdout. */
 function run(args, env) {
   const result = spawnSync(dsh, args, { cwd: root, env, encoding: 'utf8' })
@@ -55,9 +69,11 @@ try {
   if (!composed.includes(`# == ${pkg.name}`)) fail(`the composed profile does not list ${pkg.name}`)
   if (!/id: model-queue[\s\S]*?name: dsh-model-queue/.test(composed)) fail('the model-queue row is missing from the composed tree')
 
-  // Boot a Web surface on an OS-assigned port and wait for its URL, which
-  // carries the launch token the API requires.
-  const port = 7411
+  // Boot a Web surface on a free high port and wait for its URL, which carries
+  // the launch token the API requires. The port is probed first: a fixed port
+  // would collide with a previous run whose host has not finished exiting, and
+  // that failure would look like a plugin problem.
+  const port = await freePort()
   child = spawn(dsh, ['--profile', profile, '--host', '127.0.0.1', '--port', String(port), '--no-open'], {
     cwd: root,
     env,
@@ -98,6 +114,11 @@ try {
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error))
 } finally {
-  if (child !== undefined && child.exitCode === null) child.kill('SIGTERM')
+  if (child !== undefined && child.exitCode === null) {
+    child.kill('SIGTERM')
+    // Give the host a moment to release its port and flush, so a following run
+    // does not race this one's listener.
+    await new Promise(resolve => { setTimeout(resolve, 1500) })
+  }
   rmSync(home, { recursive: true, force: true })
 }

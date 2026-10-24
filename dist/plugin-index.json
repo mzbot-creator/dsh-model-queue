@@ -1,0 +1,30 @@
+{
+  "format": 1,
+  "title": "Model Queue",
+  "plugins": [
+    {
+      "name": "dsh-model-queue",
+      "title": "Model Queue",
+      "description": "Ordered model failover queue for DeepSeek Harness: try the head model first, rotate failures to the tail with a cooldown, and share one queue across sessions and browsers.",
+      "author": "mzbot",
+      "homepage": "https://github.com/mzbot-creator/dsh-model-queue#readme",
+      "repository": {
+        "url": "https://github.com/mzbot-creator/dsh-model-queue"
+      },
+      "versions": [
+        {
+          "version": "0.1.0",
+          "publishTimestamp": 1792866862,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/mzbot-creator/dsh-model-queue"
+          },
+          "engines": {
+            "node": ">=22.19.0",
+            "dsh": ">=0.2.0-rc.1 <0.3.0"
+          }
+        }
+      ]
+    }
+  ]
+}

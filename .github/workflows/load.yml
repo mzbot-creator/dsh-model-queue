@@ -1,0 +1,30 @@
+name: Load
+
+# The only job that boots a real harness. It installs the checkout into a
+# throwaway profile and asserts the plugin activates, registers its route and
+# serves its API — the checks that no unit test can make.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - run: npm ci
+      - name: Install the published dsh CLI
+        run: npm install --no-save @deepseek-ai/dsh@0.2.1-rc.3
+      - name: Boot a harness with this plugin installed
+        run: npm run verify:load
+        env:
+          DSH_BIN: ./node_modules/.bin/dsh

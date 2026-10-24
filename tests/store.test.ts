@@ -1,0 +1,127 @@
+/**
+ * Persistence tests: round-trip, quarantine on corruption, atomic replacement
+ * under concurrent commits.
+ */
+
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { QueueStore, parseDocument, queuePathIn } from '../src/store.ts'
+import type { QueueState } from '../src/queue.ts'
+
+/** Collect warnings so a test can assert the user was told. */
+function recorder(): { warn(message: string): void, messages: string[] } {
+  const messages: string[] = []
+  return { messages, warn: (message: string) => { messages.push(message) } }
+}
+
+/** Build a small state. */
+function sample(revision = 3): QueueState {
+  return {
+    revision,
+    cooldownMs: 60_000,
+    entries: [
+      {
+        id: 'a',
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-flash',
+        label: 'DeepSeek V4 Flash',
+        cooldownUntil: 1_700_000_000_000,
+        failures: 2,
+        lastFailure: { code: 'QUOTA', message: 'out of credit', at: 1_699_999_000_000 },
+      },
+      { id: 'b', provider: 'od3', model: 'deepseek-v4.1-flash', label: 'OD3 V4.1 Flash', cooldownUntil: 0, failures: 0 },
+    ],
+  }
+}
+
+test('the queue document path lives under the harness home', () => {
+  assert.equal(queuePathIn('/home/u/.dsh'), '/home/u/.dsh/model-queue/queue.json')
+})
+
+test('a missing document loads as an empty queue', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mq-store-'))
+  const store = new QueueStore(join(dir, 'queue.json'), recorder())
+  const loaded = await store.load()
+  assert.deepEqual(loaded.entries, [])
+  assert.equal(loaded.revision, 0)
+})
+
+test('a written state round-trips', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mq-store-'))
+  const path = join(dir, 'queue.json')
+  const first = new QueueStore(path, recorder())
+  await first.load()
+  await first.commit(sample())
+
+  const second = new QueueStore(path, recorder())
+  const loaded = await second.load()
+  assert.deepEqual(loaded, sample())
+})
+
+test('a corrupt document is quarantined rather than overwritten', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mq-store-'))
+  const path = join(dir, 'queue.json')
+  await writeFile(path, '{ not json', 'utf8')
+  const log = recorder()
+  const store = new QueueStore(path, log)
+  const loaded = await store.load()
+  assert.deepEqual(loaded.entries, [])
+  assert.equal(log.messages.length, 1)
+  assert.match(log.messages[0] ?? '', /could not be read/)
+  const names = await readdir(dir)
+  assert.ok(names.some(name => name.startsWith('queue.json.corrupt-')), `expected a quarantine file, saw ${names.join(', ')}`)
+})
+
+test('an unsupported version is refused', () => {
+  assert.throws(() => parseDocument({ version: 99, revision: 0, entries: [] }), /unsupported queue document version/)
+})
+
+test('duplicate ids are refused', () => {
+  assert.throws(() => parseDocument({
+    version: 1,
+    revision: 0,
+    entries: [
+      { id: 'x', provider: 'p', model: 'm', label: 'l', cooldownUntil: 0, failures: 0 },
+      { id: 'x', provider: 'p', model: 'm', label: 'l', cooldownUntil: 0, failures: 0 },
+    ],
+  }), /ids must be unique/)
+})
+
+test('an over-long queue is refused', () => {
+  const entries = Array.from({ length: 65 }, (_unused, index) => ({
+    id: `e${index}`, provider: 'p', model: 'm', label: 'l', cooldownUntil: 0, failures: 0,
+  }))
+  assert.throws(() => parseDocument({ version: 1, revision: 0, entries }), /at most 64/)
+})
+
+test('concurrent commits all reach the disk, last one winning', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mq-store-'))
+  const path = join(dir, 'queue.json')
+  const store = new QueueStore(path, recorder())
+  await store.load()
+  await Promise.all([
+    store.commit(sample(1)),
+    store.commit(sample(2)),
+    store.commit(sample(3)),
+    store.commit(sample(4)),
+  ])
+  const text = await readFile(path, 'utf8')
+  assert.equal((JSON.parse(text) as QueueState & { version: number }).revision, 4)
+  // No temporary files survive a successful write.
+  const names = await readdir(dir)
+  assert.deepEqual(names, ['queue.json'])
+})
+
+test('a stored failure without a message is refused', () => {
+  assert.throws(() => parseDocument({
+    version: 1,
+    revision: 0,
+    entries: [{
+      id: 'a', provider: 'p', model: 'm', label: 'l', cooldownUntil: 0, failures: 1,
+      lastFailure: { code: 'QUOTA', at: 1 },
+    }],
+  }), /lastFailure.message/)
+})

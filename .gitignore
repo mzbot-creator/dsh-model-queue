@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build scratch
+.tmp/
+
+# Local test output
+*.log
+.cache/
+
+# Release tarballs are uploaded by the release job, never committed
+dist/*.tgz
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+.idea/

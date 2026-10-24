@@ -1,0 +1,32 @@
+name: Plugin index
+
+# Regenerate the machine-readable description of this repository's bundles.
+# It is a build artifact of the manifests, not hand-written, so it cannot claim
+# an install source that the repository does not offer.
+on:
+  push:
+    branches: [main]
+    paths: ['package.json', 'cordis.patch.yml', 'lib/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Write dist/plugin-index.json from package.json
+        run: node scripts/plugin-index.mjs
+      - name: Commit the index when it changed
+        run: |
+          if git diff --quiet -- dist/plugin-index.json; then exit 0; fi
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add dist/plugin-index.json
+          git commit -m 'chore: refresh the plugin index'
+          git push

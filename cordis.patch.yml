@@ -1,0 +1,13 @@
+# The dsh-model-queue bundle layer.
+#
+# One row: the plugin owns the shared queue, registers the `dsh-model-queue`
+# provider route, and serves the browser API its settings page reads. The row
+# carries a config document from the first boot, so Plugins → Model Queue has a
+# form to edit without a second reload.
+- insert:
+    - id: model-queue
+      name: dsh-model-queue
+      config:
+        enabled: true
+        cooldownMs: 3600000
+        offerWhenEmpty: false

@@ -31,7 +31,17 @@ dsh plugin --profile web add github:mzbot-creator/dsh-model-queue
 
 ## 用起来是什么样
 
-**Plugins → Model Queue**：
+![设置页](docs/images/settings-page.png)
+
+装好后新会话的模型选择器里多一个 **Model Queue** 分组：
+
+![模型选择器](docs/images/model-picker.png)
+
+选中它发消息，答案由队首模型给出：
+
+![会话](docs/images/session-reply.png)
+
+**Plugins → Model Queue** 页面的细节：
 
 - **Status**：现在能不能请求（Ready / All cooling down / Queue is empty）；全部冷却时显示最后一次失败的原因。
 - **Queue order**：成员列表。队首标 `Head`；冷却中的成员显示 `Cooldown left 52min`、失败次数和上次失败原因。`↑` `↓` 调顺序，`Remove` 移除。

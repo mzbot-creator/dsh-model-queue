@@ -7,10 +7,14 @@
 ## 装
 
 ```sh
-dsh plugin --profile web add github:mzbot-creator/dsh-model-queue
+dsh plugin --profile web add https://github.com/mzbot-creator/dsh-model-queue/releases/latest/download/dsh-model-queue-0.2.0.tgz
 ```
 
-`lib/` 是随仓库提交的构建产物，所以装完就能直接用，不需要在安装时编译（pnpm 会拦截 git 依赖的 prepare 脚本）。
+装的是某个具体版本的打包产物，所以拿到的东西永远可复现。把 URL 里的版本号换成想要的
+版本即可；装最新版也可以走 `github:mzbot-creator/dsh-model-queue`（跟 `main` 头走）。
+
+`lib/` 是随仓库提交的构建产物，所以装完就能直接用，不需要在安装时编译（pnpm 会拦截
+git 依赖的 prepare 脚本）。
 
 - 卸载：`dsh plugin --profile web remove dsh-model-queue`
 - 从本地 checkout 装（开发用）：`dsh plugin --profile web add /path/to/dsh-model-queue`
@@ -172,7 +176,8 @@ dsh plugin --profile web add https://github.com/mzbot-creator/dsh-model-queue/re
 
 **已实测**（本机真实 dsh `0.2.1-rc.3` + 真实 provider，自建 home，无头浏览器驱动）：
 
-- `dsh plugin --profile <p> add <仓库路径>` 装得上，插件出现在 Plugins → Installed，开关可切换
+- `dsh plugin --profile <p> add <release tarball URL>` 装得上（`0.2.0` 的 release 产物），插件出现在 Plugins → Installed，开关可切换
+- 打 tag 推上去后 Release 工作流跑绿，`dsh-model-queue-0.2.0.tgz` 挂在 GitHub Release 上
 - 页面完整渲染四项能力与每项的说明文字，无控制台错误
 - 会话选中 Model Queue 并真实发消息，回复经队列路由由队首成员给出（下图即本次实测）
 - 逐项改配置后即时生效：把上下文改成 200000，队列路由公布值随之收紧到 200000

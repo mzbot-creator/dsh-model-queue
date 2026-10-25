@@ -124,7 +124,7 @@ Harness 是「一个会话选一个模型」。插件注册**一条自己的 pro
 
 ## HTTP 接口
 
-页面用这五个同源、经宿主认证的接口（前缀 `/api/dsh-model-queue`）：
+页面用这六个同源、经宿主认证的接口（前缀 `/api/dsh-model-queue`）：
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
@@ -142,7 +142,7 @@ npm ci
 npm run typecheck   # host + client
 npm run compile     # 写 lib/（产物入库）
 npm run check:dist  # 校验 lib/ 与源码一致
-npm test            # 47 个单测
+npm test            # 61 个单测
 npm run verify:load # 装进临时 profile、真的启动一次、查 API
 ```
 
@@ -152,21 +152,16 @@ npm run verify:load # 装进临时 profile、真的启动一次、查 API
 
 ## 已验证与未验证
 
-**已实测**（本机真实 dsh `0.2.1-rc.3` + 真实 provider）：
+**已实测**（本机真实 dsh `0.2.1-rc.3` + 真实 provider，自建 home，无头浏览器驱动）：
 
-- 插件出现在 Plugins → Installed，开关可切换
-- 页面配置卡完整渲染，无控制台错误
-- 会话选中 Model Queue 并发消息，请求经队列路由成功返回
+- `dsh plugin --profile <p> add <仓库路径>` 装得上，插件出现在 Plugins → Installed，开关可切换
+- 页面完整渲染四项能力与每项的说明文字，无控制台错误
+- 会话选中 Model Queue 并真实发消息，回复经队列路由由队首成员给出（下图即本次实测）
+- 逐项改配置后即时生效：把上下文改成 200000，队列路由公布值随之收紧到 200000
+- `Re-sync from dsh` 之后手动覆盖仍在；`Follow dsh again` 清空覆盖，公布值回到成员真实值
 - 队首指向坏路由时，**同一个请求内**轮换到下一个成员并成功回答；坏成员移到队尾、`remainingMs ≈ 3600000`、记录了 `NO_ADAPTER`
 - 两个独立浏览器上下文读到同一份队列（head 一致）
 - 全部成员冷却时，错误码与消息是**最后一次失败的原样内容**
-
-**本次（0.2.0）实测**，本机真实 dsh + 真实 provider：
-
-- Plugins → Model Queue 页面显示每个成员的四项配置与「Queue route effective」
-- `Edit configuration` 改动上下文窗口后，队列路由公布的值随之收紧（取成员最小值）
-- `Re-sync from dsh` 把 dsh 里改过的配置读回来，手动覆盖保留
-- 推理等级在成员上选定后，未指定档位的请求按该档发出
 
 **未验证**：
 

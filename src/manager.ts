@@ -32,7 +32,7 @@ import type {
   QueueView,
 } from './contract.ts'
 import { PROVIDER_ID, QUEUE_MODEL_ID } from './contract.ts'
-import { UNKNOWN_CONFIG, applyOverrides, configFromListing, configFromResolved } from './model-config.ts'
+import { UNKNOWN_CONFIG, aggregateRouteConfig, applyOverrides, configFromListing, configFromResolved } from './model-config.ts'
 
 /** What the queue route advertises to the loop, derived from the current members. */
 export interface RouteFacts {
@@ -454,58 +454,16 @@ export class QueueManager {
    * Aggregate the members' effective configurations into the facts the queue
    * route advertises.
    *
-   * Text is always admitted; images only when *every* member accepts them, so a
-   * rotation never hands an image to a text-only model. The context window and
-   * the output cap are the smallest members' for the same reason: an optimistic
-   * value would let the loop admit a request one member cannot serve, and the
-   * rotation would then fail for a reason the user cannot act on.
+   * The aggregation itself lives in `model-config`, where it is a pure function
+   * of the members' configurations and can be tested without a registry; this
+   * method only supplies the per-member inputs. The effective configuration
+   * already falls back to the snapshot a row captured, so a cold resolve cache
+   * (a fresh boot, a page load before any request) still aggregates what dsh
+   * last said instead of advertising nothing at all.
    * @returns the advertised configuration.
    */
   routeConfig(): ModelConfig {
-    const state = this.state()
-    let contextWindow = Number.POSITIVE_INFINITY
-    let maxTokens = Number.POSITIVE_INFINITY
-    let images = state.entries.length > 0
-    let resolved = 0
-    /** The levels every member offers, in the first member's order. */
-    let commonEfforts: { id: string, name: string, description?: string }[] | undefined
-    let defaultEffort: string | undefined
-    for (const entry of state.entries) {
-      const facts = this.memberFacts(entry.provider, entry.model)
-      const config = this.effectiveConfig(entry)
-      if (facts === undefined) {
-        // Unknown member: assume the conservative answer rather than an
-        // optimistic one, because a rotation may land on this entry.
-        images = false
-        commonEfforts = []
-        continue
-      }
-      resolved += 1
-      contextWindow = Math.min(contextWindow, config.contextWindow ?? Number.POSITIVE_INFINITY)
-      maxTokens = Math.min(maxTokens, config.maxTokens ?? Number.POSITIVE_INFINITY)
-      if (!config.inputModalities.includes('image')) images = false
-      const efforts = config.reasoning?.efforts ?? []
-      if (commonEfforts === undefined) {
-        commonEfforts = [...efforts]
-        defaultEffort = config.reasoning?.defaultEffort
-      } else {
-        const ids = new Set(efforts.map(effort => effort.id))
-        commonEfforts = commonEfforts.filter(effort => ids.has(effort.id))
-        if (defaultEffort !== undefined && !ids.has(defaultEffort)) defaultEffort = undefined
-      }
-    }
-    const reasoning = commonEfforts === undefined || commonEfforts.length === 0
-      ? undefined
-      : {
-          efforts: commonEfforts,
-          ...defaultEffort === undefined ? {} : { defaultEffort },
-        }
-    return {
-      inputModalities: images && resolved > 0 ? ['text', 'image'] : ['text'],
-      ...Number.isFinite(contextWindow) ? { contextWindow } : {},
-      ...Number.isFinite(maxTokens) ? { maxTokens } : {},
-      ...reasoning === undefined ? {} : { reasoning },
-    }
+    return aggregateRouteConfig(this.state().entries.map(entry => this.effectiveConfig(entry)))
   }
 
   /**
@@ -521,6 +479,21 @@ export class QueueManager {
       ...config.maxTokens === undefined ? {} : { defaultMaxTokens: config.maxTokens },
       ...config.reasoning === undefined ? {} : { reasoning: config.reasoning },
     }
+  }
+
+  /**
+   * Refresh the capability caches for every member whose facts are missing or
+   * have expired, leaving the fresh ones alone.
+   *
+   * The browser polls the queue view, and a view cannot describe a row whose
+   * facts it does not have. Re-resolving every member on every poll would hammer
+   * the providers, so this only pays for the entries that actually went stale.
+   * @returns when the stale members have been attempted.
+   */
+  async ensureFacts(): Promise<void> {
+    await Promise.all(this.state().entries.map(entry => this.memberFacts(entry.provider, entry.model) === undefined
+      ? this.resolveConfig(entry.provider, entry.model)
+      : undefined))
   }
 
   /**

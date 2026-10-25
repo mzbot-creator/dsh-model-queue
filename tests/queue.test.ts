@@ -167,3 +167,26 @@ test('changing the cooldown applies to the next failure only', () => {
   const after = rotateFailed(changed, 'a', { code: 'QUOTA', message: 'x' }, 1000)
   assert.equal(after.entries[0]?.cooldownUntil, 1010)
 })
+
+test('an empty overrides object clears a row back to the dsh configuration', () => {
+  const configured = setEntries(
+    state(),
+    [{ id: 'a', provider: 'p', model: 'a', overrides: { contextWindow: 1000 } }],
+    [],
+  )
+  assert.deepEqual(configured.entries[0]?.overrides, { contextWindow: 1000 })
+  // `{}` is the page saying "follow dsh again"; omitting the key is a reorder
+  // that must leave the stored overrides alone.
+  const cleared = setEntries(configured, [{ id: 'a', provider: 'p', model: 'a', overrides: {} }], [])
+  assert.deepEqual(cleared.entries[0]?.overrides, {})
+  const reordered = setEntries(configured, [{ id: 'a', provider: 'p', model: 'a' }], [])
+  assert.deepEqual(reordered.entries[0]?.overrides, { contextWindow: 1000 })
+})
+
+test('an omitted snapshot on an unrelated row keeps the one it already carries', () => {
+  const snapshot = { inputModalities: ['text', 'image'], contextWindow: 262_000 } as const
+  const added = setEntries(state(), [{ id: 'a', provider: 'p', model: 'a', snapshot }], [])
+  assert.deepEqual(added.entries[0]?.snapshot, snapshot)
+  const reordered = setEntries(added, [{ id: 'a', provider: 'p', model: 'a' }], [])
+  assert.deepEqual(reordered.entries[0]?.snapshot, snapshot)
+})

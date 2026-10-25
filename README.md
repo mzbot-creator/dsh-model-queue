@@ -7,11 +7,16 @@
 ## 装
 
 ```sh
-dsh plugin --profile web add https://github.com/mzbot-creator/dsh-model-queue/releases/latest/download/dsh-model-queue-0.2.0.tgz
+dsh plugin --profile web add github:mzbot-creator/dsh-model-queue#v0.2.0
 ```
 
-装的是某个具体版本的打包产物，所以拿到的东西永远可复现。把 URL 里的版本号换成想要的
-版本即可；装最新版也可以走 `github:mzbot-creator/dsh-model-queue`（跟 `main` 头走）。
+`#v0.2.0` 把版本钉在 tag 上，所以装到的东西可复现；省略它则跟 `main` 头走。
+
+**不要用 release 里的 `.tgz` 链接装**：dsh 的 profile 固定用 `nodeLinker: hoisted`，而
+pnpm 10 在这个模式下装远程 tarball URL 会报 `ERR_PNPM_MISSING_TARBALL_INTEGRITY`
+（它不会把 integrity 写进 lockfile，随后又要求校验）。这是 pnpm 与 hoisted 组合的限制，
+本地 `.tgz` 文件路径和 `github:` 形式都不受影响。Release 页面上的 `.tgz` 仍然可用，
+但只在 `nodeLinker` 不是 `hoisted` 的环境里能直接装。
 
 `lib/` 是随仓库提交的构建产物，所以装完就能直接用，不需要在安装时编译（pnpm 会拦截
 git 依赖的 prepare 脚本）。
@@ -161,10 +166,10 @@ git tag -a v0.2.0 -m "0.2.0" && git push origin v0.2.0
 ```
 
 Release 工作流会校验 tag 与版本号一致、跑全部检查（含真的启动一次 harness）、
-`npm pack`，然后把 `.tgz` 挂到 GitHub Release 上。装最新版仍然是一条命令：
+`npm pack`，然后把 `.tgz` 挂到 GitHub Release 上。装这个版本仍然是 tag 一条命令：
 
 ```sh
-dsh plugin --profile web add https://github.com/mzbot-creator/dsh-model-queue/releases/latest/download/dsh-model-queue-0.2.0.tgz
+dsh plugin --profile web add github:mzbot-creator/dsh-model-queue#v0.2.0
 ```
 
 `npm publish` 是可选渠道：它需要仓库里配 `NPM_TOKEN`。本仓库没有配，所以工作流会
@@ -176,7 +181,7 @@ dsh plugin --profile web add https://github.com/mzbot-creator/dsh-model-queue/re
 
 **已实测**（本机真实 dsh `0.2.1-rc.3` + 真实 provider，自建 home，无头浏览器驱动）：
 
-- `dsh plugin --profile <p> add <release tarball URL>` 装得上（`0.2.0` 的 release 产物），插件出现在 Plugins → Installed，开关可切换
+- `dsh plugin --profile <p> add github:mzbot-creator/dsh-model-queue#v0.2.0` 在全新 profile 里装得上，插件出现在 Plugins → Installed，开关可切换，关掉后模型选择器里就没有 Model Queue 了
 - 打 tag 推上去后 Release 工作流跑绿，`dsh-model-queue-0.2.0.tgz` 挂在 GitHub Release 上
 - 页面完整渲染四项能力与每项的说明文字，无控制台错误
 - 会话选中 Model Queue 并真实发消息，回复经队列路由由队首成员给出（下图即本次实测）
@@ -185,6 +190,9 @@ dsh plugin --profile web add https://github.com/mzbot-creator/dsh-model-queue/re
 - 队首指向坏路由时，**同一个请求内**轮换到下一个成员并成功回答；坏成员移到队尾、`remainingMs ≈ 3600000`、记录了 `NO_ADAPTER`
 - 两个独立浏览器上下文读到同一份队列（head 一致）
 - 全部成员冷却时，错误码与消息是**最后一次失败的原样内容**
+
+**装的时候注意 pnpm 的坑**：`nodeLinker: hoisted` + 远程 tarball URL 会失败（见「装」一节），
+已实测；`github:` 形式（含钉 tag）在同样的 profile 配置下可以装、可以启动、API 正常。
 
 **未验证**：
 

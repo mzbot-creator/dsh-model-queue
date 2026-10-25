@@ -1,16 +1,21 @@
 name: Release
 
-# A tag is the release trigger: pushing v0.1.0 publishes that version and
-# attaches the packed tarball. The tag and package.json version must agree, and
-# the shipped lib/ must match its sources, so a release can never carry code
-# that was not built from what it claims.
+# A tag is the release trigger: pushing v0.2.0 builds the tarball, verifies it,
+# and publishes a GitHub Release with the tarball attached. The tag and
+# package.json version must agree, and the shipped lib/ must match its sources,
+# so a release can never carry code that was not built from what it claims.
+#
+# npm is a second, optional channel: publishing there needs an `NPM_TOKEN`
+# secret, and this repository deliberately has none. When the secret is absent
+# the npm step is skipped with a notice instead of failing the release — the
+# GitHub Release is the channel that always exists.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to (re)publish, e.g. v0.1.0
+        description: Existing tag to (re)publish, e.g. v0.2.0
         required: true
 
 permissions:
@@ -30,7 +35,14 @@ jobs:
           node-version: '24'
           cache: npm
           registry-url: 'https://registry.npmjs.org'
+      # `dsh plugin add` shells out to pnpm, and `prepublishOnly` boots a real
+      # harness, so both have to be on PATH before publishing.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
       - run: npm ci
+      - name: Install the published dsh CLI
+        run: npm install --no-save @deepseek-ai/dsh@0.2.1-rc.3
       - name: Refuse a tag that disagrees with package.json
         run: |
           tag='${{ github.event.inputs.tag || github.ref_name }}'
@@ -41,20 +53,23 @@ jobs:
           fi
       - name: Full verification
         run: npm run typecheck && npm run check:dist && npm test
-      # `prepublishOnly` runs `test:ci`, which includes `verify:load` — that
-      # boots a real harness, so the CLI has to be installed before the publish
-      # step rather than after it. Without this the publish dies on
-      # `spawnSync dsh ENOENT`, which is how v0.1.0 and v0.2.0 both failed.
-      - name: Install the published dsh CLI
-        run: npm install --no-save @deepseek-ai/dsh@0.2.1-rc.3
+      - name: Boot a harness with this plugin installed
+        run: npm run verify:load
+        env:
+          DSH_BIN: ./node_modules/.bin/dsh
       - name: Pack the installable tarball
         run: npm pack --pack-destination dist
-      - name: Publish to npm
-        run: npm publish --provenance --access public
+      - name: Publish to npm when a token is configured
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           DSH_BIN: ./node_modules/.bin/dsh
-      - name: Attach the tarball to the GitHub release
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::notice::NPM_TOKEN is not set; skipping the npm channel and publishing the GitHub Release only"
+            exit 0
+          fi
+          npm publish --provenance --access public
+      - name: Publish the GitHub Release with the tarball
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.tgz

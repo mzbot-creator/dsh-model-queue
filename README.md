@@ -148,7 +148,25 @@ npm run verify:load # 装进临时 profile、真的启动一次、查 API
 
 `npm run verify:load` 需要 PATH 上有 `dsh` 和 `pnpm`（或用 `DSH_BIN` 指定），它不会碰你自己的 harness home。
 
-发布：打一个与 `package.json` 版本一致的 tag（`v0.1.0`）并推送，Release 工作流会校验 tag、跑全部检查、`npm publish`、把 `.tgz` 挂到 GitHub Release。
+### 发布
+
+打一个与 `package.json` 版本一致的 tag 并推送：
+
+```sh
+git tag -a v0.2.0 -m "0.2.0" && git push origin v0.2.0
+```
+
+Release 工作流会校验 tag 与版本号一致、跑全部检查（含真的启动一次 harness）、
+`npm pack`，然后把 `.tgz` 挂到 GitHub Release 上。装最新版仍然是一条命令：
+
+```sh
+dsh plugin --profile web add https://github.com/mzbot-creator/dsh-model-queue/releases/latest/download/dsh-model-queue-0.2.0.tgz
+```
+
+`npm publish` 是可选渠道：它需要仓库里配 `NPM_TOKEN`。本仓库没有配，所以工作流会
+打一条 notice 跳过 npm，只发 GitHub Release —— 缺 secret 不应该让整个 release 失败。
+
+也可以手动触发（`workflow_dispatch`），传入已有 tag 重发一次。
 
 ## 已验证与未验证
 

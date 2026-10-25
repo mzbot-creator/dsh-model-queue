@@ -130,7 +130,13 @@ export function registerRoutes(ctx: Context, manager: QueueManager): () => Promi
     )
   }
 
-  register(`${QUEUE_ROUTE}/state`, ['GET'], async () => json(manager.view() satisfies QueueView))
+  // The view describes each row against what dsh last resolved for that model, so
+  // a poll that arrives after the fact cache expired has to re-resolve before
+  // answering. `ensureFacts` only pays for the members that actually went stale.
+  register(`${QUEUE_ROUTE}/state`, ['GET'], async () => {
+    await manager.ensureFacts()
+    return json(manager.view() satisfies QueueView)
+  })
 
   register(`${QUEUE_ROUTE}/catalog`, ['GET'], async () => {
     const catalog: CatalogView = await manager.catalog()
@@ -177,7 +183,11 @@ export function registerRoutes(ctx: Context, manager: QueueManager): () => Promi
         ...id === undefined ? {} : { id },
         ...label === undefined ? {} : { label },
         ...snapshot === undefined ? {} : { snapshot },
-        ...Object.keys(overrides).length === 0 ? {} : { overrides },
+        // Forwarded even when empty: `{}` is the caller saying "follow dsh
+        // again", which must be able to clear overrides a row already carries.
+        // A caller that omits the key entirely (a bare reorder) keeps them, so
+        // the distinction between absent and empty is load-bearing.
+        ...'overrides' in row ? { overrides } : {},
       }
     })
     await manager.setEntries(normalized)

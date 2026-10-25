@@ -61,6 +61,9 @@ const styles = {
   header: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 } as const,
   title: { fontSize: 14, fontWeight: 600, margin: 0 } as const,
   hint: { fontSize: 12.5, opacity: 0.68, margin: '0 0 12px', lineHeight: 1.6 } as const,
+  legend: { margin: 0, display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '6px 14px', alignItems: 'baseline' } as const,
+  legendTerm: { fontSize: 12.5, fontWeight: 600, margin: 0 } as const,
+  legendBody: { fontSize: 12.5, margin: 0, opacity: 0.78, lineHeight: 1.55 } as const,
   row: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } as const,
   member: {
     padding: '8px 10px',
@@ -188,6 +191,15 @@ const TEXT = {
     capsTitle: '模型配置',
     capsIntro: '下面每一项都是 dsh 为这个模型解析出的真实配置；“队列路由最终生效”是队列对外公布、实际派发时使用的值。默认完全沿用 dsh 的配置，只有手动修改过的项才会不同（绿色标记）。',
     routeTitle: '队列路由对外公布的配置',
+    legendImage: '读图',
+    legendImageBody: '该模型能不能接收图片。默认沿用 dsh 的解析结果；改成“仅文本”后，队列不会再把图片派发给它，改这个成员时队列路由的读图能力也会跟着收紧。',
+    legendContext: '上下文窗口',
+    legendContextBody: '一次请求里输入加输出最多能用多少 token。默认沿用 dsh；调小之后队列会按这个更保守的值对外公布窗口，避免宿主编排出这个成员接不住的请求。',
+    legendOutput: '单次输出上限',
+    legendOutputBody: '一次回复最多能生成多少 token。默认沿用 dsh；调小之后，派发给这个成员的请求如果要求更大的输出，会被自动下调到这个值。',
+    legendReasoning: '推理等级',
+    legendReasoningBody: '该模型提供的推理档位（例如 Low / Medium / High）。默认沿用 dsh 的默认档；选定一档后，调用方没有指定档位（或指定了该成员不支持的档位）时就用它。',
+    legendFollow: '四项都默认“沿用 dsh”：dsh 里的模型声明改了，点一次 Re-sync from dsh 即可同步，不必删除重加。只有你手动改过的项不同，并会标绿。',
     routeHint: '队列在模型选择器里只出现一个 "Model Queue"。它对外公布的读图能力、上下文窗口、输出上限和推理等级，按所有成员的“共同可用范围”计算：读图要求每个成员都支持，上下文与输出取最小成员的值，推理等级取所有成员都提供的交集。因此任何一次轮转都不会把请求交给接不住的模型。',
     capImage: '读图',
     capImageYes: '支持',
@@ -220,6 +232,7 @@ const TEXT = {
     imageForceOn: '强制支持图片',
     imageForceOff: '强制不支持图片',
     reasoningInherit: '沿用 dsh 默认（{value}）',
+    reasoningInheritNoDefault: '沿用 dsh 默认（未指定档位）',
     reasoningNone: '不设置',
     undefinedValue: '未声明',
     modelsCount: '个模型',
@@ -265,6 +278,15 @@ const TEXT = {
     capsTitle: 'Model configuration',
     capsIntro: 'Every value below is what dsh itself resolved for that model. "Queue route effective" is the value the queue advertises and actually dispatches with. Everything follows dsh by default; only fields you changed differ (marked green).',
     routeTitle: 'What the queue route advertises',
+    legendImage: 'Image support',
+    legendImageBody: 'Whether this model can receive images. Follows what dsh resolved by default; set it to text only and the queue stops sending images to this member, which also narrows what the queue route advertises.',
+    legendContext: 'Context window',
+    legendContextBody: 'How many tokens one request may use for input plus output. Follows dsh by default; lowering it makes the queue advertise the smaller window, so the harness never plans a request this member cannot serve.',
+    legendOutput: 'Output cap',
+    legendOutputBody: 'How many tokens one reply may generate. Follows dsh by default; once lowered, a request that asks for more output is reduced to this value when it is dispatched to this member.',
+    legendReasoning: 'Reasoning level',
+    legendReasoningBody: 'The reasoning efforts this model offers (for example Low / Medium / High). Follows the dsh default by default; once you pick one, it is used whenever the caller names no level, or names one this member does not support.',
+    legendFollow: 'All four follow dsh by default: when a model declaration in dsh changes, one click on Re-sync from dsh brings the queue up to date without re-adding the row. Only the fields you changed differ, and they are marked green.',
     routeHint: 'The queue appears as one "Model Queue" in the picker. The image support, context window, output cap and reasoning levels it advertises are the intersection of its members: images require every member to accept them, context and output use the smallest member, and reasoning levels are the ones every member offers. That is why a rotation can never hand a request to a member that cannot serve it.',
     capImage: 'Images',
     capImageYes: 'yes',
@@ -297,6 +319,7 @@ const TEXT = {
     imageForceOn: 'Force image support',
     imageForceOff: 'Force text only',
     reasoningInherit: 'Follow dsh default ({value})',
+    reasoningInheritNoDefault: 'Follow dsh default (no level named)',
     reasoningNone: 'none',
     undefinedValue: 'not declared',
     modelsCount: 'model(s)',
@@ -530,7 +553,9 @@ export function ModelQueueSection(props: ModelQueueSectionInjected) {
     provider: entry.provider,
     model: entry.model,
     label: entry.label,
-    ...Object.keys(entry.overrides).length === 0 ? {} : { overrides: entry.overrides },
+    // Always present, even when empty: `{}` is how this page says "follow dsh
+    // again", while omitting the key would mean "keep whatever is stored".
+    overrides: entry.overrides,
   })), [])
 
   const move = useCallback(async (index: number, delta: number) => {
@@ -686,6 +711,17 @@ export function ModelQueueSection(props: ModelQueueSectionInjected) {
       <section style={styles.card}>
         <div style={styles.header}><h3 style={styles.title}>{t.capsTitle}</h3></div>
         <p style={styles.hint}>{t.capsIntro}</p>
+        <dl style={styles.legend}>
+          <dt style={styles.legendTerm}>{t.legendImage}</dt>
+          <dd style={styles.legendBody}>{t.legendImageBody}</dd>
+          <dt style={styles.legendTerm}>{t.legendContext}</dt>
+          <dd style={styles.legendBody}>{t.legendContextBody}</dd>
+          <dt style={styles.legendTerm}>{t.legendOutput}</dt>
+          <dd style={styles.legendBody}>{t.legendOutputBody}</dd>
+          <dt style={styles.legendTerm}>{t.legendReasoning}</dt>
+          <dd style={styles.legendBody}>{t.legendReasoningBody}</dd>
+        </dl>
+        <p style={{ ...styles.hint, marginTop: 10 }}>{t.legendFollow}</p>
       </section>
 
       <section style={styles.card}>
@@ -877,7 +913,7 @@ function Editor(props: {
         <input
           type='number'
           min={1}
-          placeholder={tokens(dsh.contextWindow, t.undefinedValue)}
+          placeholder={dsh.contextWindow === undefined ? t.undefinedValue : String(dsh.contextWindow)}
           style={styles.input}
           value={draft.contextWindow === undefined ? '' : String(draft.contextWindow)}
           disabled={busy}
@@ -903,7 +939,7 @@ function Editor(props: {
         <input
           type='number'
           min={1}
-          placeholder={tokens(dsh.maxTokens, t.undefinedValue)}
+          placeholder={dsh.maxTokens === undefined ? t.undefinedValue : String(dsh.maxTokens)}
           style={styles.input}
           value={draft.maxTokens === undefined ? '' : String(draft.maxTokens)}
           disabled={busy}
@@ -942,7 +978,9 @@ function Editor(props: {
                   }}
                 >
                   <option value=''>
-                    {t.reasoningInherit.replace('{value}', effortName(dsh, dsh.reasoning?.defaultEffort ?? ''))}
+                    {dsh.reasoning?.defaultEffort === undefined
+                      ? t.reasoningInheritNoDefault
+                      : t.reasoningInherit.replace('{value}', effortName(dsh, dsh.reasoning.defaultEffort))}
                   </option>
                   {efforts.map(effort => (
                     <option key={effort.id} value={effort.id}>

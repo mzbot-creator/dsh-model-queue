@@ -271,3 +271,60 @@ function parseStoredReasoning(value: unknown): ModelReasoning | undefined {
     ...defaultEffort === undefined || !seen.has(defaultEffort) ? {} : { defaultEffort },
   }
 }
+
+/**
+ * Aggregate the members' effective configurations into the facts the queue
+ * route advertises.
+ *
+ * The queue appears in the picker as one model, so it has to publish a single
+ * set of capabilities. Each one is the *intersection* of its members, because a
+ * rotation may land on any of them:
+ *
+ * - images only when every member accepts them;
+ * - the context window and output cap of the smallest member;
+ * - only the reasoning levels every member offers, with a default only when all
+ *   of them declare the same one.
+ *
+ * A member nothing is known about (`UNKNOWN_CONFIG`) makes the whole route
+ * conservative rather than optimistic, for the same reason.
+ * @param configs - each member's effective configuration, in queue order.
+ * @returns the advertised configuration; text-only and capacity-free when empty.
+ */
+export function aggregateRouteConfig(configs: readonly ModelConfig[]): ModelConfig {
+  let contextWindow = Number.POSITIVE_INFINITY
+  let maxTokens = Number.POSITIVE_INFINITY
+  let images = configs.length > 0
+  let known = 0
+  /** The levels every member offers so far, in the first member's order. */
+  let commonEfforts: ModelReasoningEffort[] | undefined
+  let defaultEffort: string | undefined
+  for (const config of configs) {
+    if (config.inputModalities.length === 0 && config.contextWindow === undefined) {
+      images = false
+      commonEfforts = []
+      continue
+    }
+    known += 1
+    contextWindow = Math.min(contextWindow, config.contextWindow ?? Number.POSITIVE_INFINITY)
+    maxTokens = Math.min(maxTokens, config.maxTokens ?? Number.POSITIVE_INFINITY)
+    if (!config.inputModalities.includes('image')) images = false
+    const efforts = config.reasoning?.efforts ?? []
+    if (commonEfforts === undefined) {
+      commonEfforts = [...efforts]
+      defaultEffort = config.reasoning?.defaultEffort
+      continue
+    }
+    const ids = new Set(efforts.map(effort => effort.id))
+    commonEfforts = commonEfforts.filter(effort => ids.has(effort.id))
+    if (defaultEffort !== undefined && !ids.has(defaultEffort)) defaultEffort = undefined
+  }
+  const reasoning = commonEfforts === undefined || commonEfforts.length === 0
+    ? undefined
+    : { efforts: commonEfforts, ...defaultEffort === undefined ? {} : { defaultEffort } }
+  return {
+    inputModalities: images && known > 0 ? ['text', 'image'] : ['text'],
+    ...Number.isFinite(contextWindow) ? { contextWindow } : {},
+    ...Number.isFinite(maxTokens) ? { maxTokens } : {},
+    ...reasoning === undefined ? {} : { reasoning },
+  }
+}

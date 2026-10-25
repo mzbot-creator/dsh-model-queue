@@ -9,6 +9,9 @@
  * @module dsh-model-queue/queue
  */
 
+import type { ModelConfig, ModelConfigOverrides } from './contract.ts'
+import { UNKNOWN_CONFIG } from './model-config.ts'
+
 /** One model in the queue: a provider route plus a model id on that route. */
 export interface QueueEntry {
   /** Stable local id. Survives rotation; never reused. */
@@ -19,6 +22,14 @@ export interface QueueEntry {
   readonly model: string
   /** Label captured when the entry was added, so the queue still reads well when a route is offline. */
   readonly label: string
+  /**
+   * The model's configuration as the harness last reported it, captured when
+   * the row was added or last re-synced. It keeps the page honest while the
+   * route is offline, and it is what the row's overrides are layered on.
+   */
+  readonly snapshot: ModelConfig
+  /** The row's explicit departures from {@link snapshot}; empty means "follow the route". */
+  readonly overrides: ModelConfigOverrides
   /** Epoch milliseconds before which the queue will not select this entry; `0` means ready. */
   readonly cooldownUntil: number
   /** Why the entry last entered cooldown; absent for an entry that never failed. */
@@ -57,6 +68,10 @@ export interface EntryRequest {
   readonly model: string
   /** Optional display label; defaults to `provider/model`. */
   readonly label?: string
+  /** The configuration captured for this row; kept when the caller omits it on a reorder. */
+  readonly snapshot?: ModelConfig
+  /** The row's explicit departures from its snapshot; omitted on a reorder keeps the stored ones. */
+  readonly overrides?: ModelConfigOverrides
 }
 
 /** Result of asking the queue which entry a request should start from. */
@@ -200,8 +215,19 @@ export function setEntries(
     const label = wanted.label !== undefined && wanted.label !== ''
       ? wanted.label
       : existing?.label ?? `${wanted.provider}/${wanted.model}`
-    if (existing !== undefined && existing.provider === wanted.provider && existing.model === wanted.model) {
-      entries.push({ ...existing, label })
+    const sameModel = existing !== undefined
+      && existing.provider === wanted.provider
+      && existing.model === wanted.model
+    // A reorder sends only ids and order, so an omitted field keeps what the row
+    // already carried. Adding a model sends both, and the caller's values win.
+    const snapshot = sameModel
+      ? wanted.snapshot ?? existing.snapshot
+      : wanted.snapshot ?? UNKNOWN_CONFIG
+    const overrides = sameModel
+      ? wanted.overrides ?? existing.overrides
+      : wanted.overrides ?? {}
+    if (sameModel) {
+      entries.push({ ...existing, label, snapshot, overrides })
       return
     }
     entries.push({
@@ -209,6 +235,8 @@ export function setEntries(
       provider: wanted.provider,
       model: wanted.model,
       label,
+      snapshot,
+      overrides,
       cooldownUntil: existing?.cooldownUntil ?? 0,
       ...existing?.lastFailure === undefined ? {} : { lastFailure: existing.lastFailure },
       failures: existing?.failures ?? 0,
@@ -258,10 +286,58 @@ function sameEntries(left: readonly QueueEntry[], right: readonly QueueEntry[]):
       && entry.provider === other.provider
       && entry.model === other.model
       && entry.label === other.label
+      && sameConfig(entry.snapshot, other.snapshot)
+      && sameOverrides(entry.overrides, other.overrides)
       && entry.cooldownUntil === other.cooldownUntil
       && entry.failures === other.failures
       && entry.lastFailure?.at === other.lastFailure?.at
       && entry.lastFailure?.code === other.lastFailure?.code
       && entry.lastFailure?.message === other.lastFailure?.message
   })
+}
+
+/**
+ * Compare two snapshots for structural equality.
+ *
+ * Capacities and modalities are compared directly; the reasoning block is
+ * compared by its ordered levels and its default, because a member reopening a
+ * page must not look like a change.
+ * @param left - first snapshot.
+ * @param right - second snapshot.
+ * @returns whether both describe the same configuration.
+ */
+export function sameConfig(left: ModelConfig | undefined, right: ModelConfig | undefined): boolean {
+  if (left === right) return true
+  if (left === undefined || right === undefined) return false
+  if (left.contextWindow !== right.contextWindow) return false
+  if (left.maxTokens !== right.maxTokens) return false
+  if (left.inputModalities.length !== right.inputModalities.length) return false
+  if (!left.inputModalities.every((modality, index) => right.inputModalities[index] === modality)) return false
+  const leftEfforts = left.reasoning?.efforts ?? []
+  const rightEfforts = right.reasoning?.efforts ?? []
+  if (leftEfforts.length !== rightEfforts.length) return false
+  if (left.reasoning?.defaultEffort !== right.reasoning?.defaultEffort) return false
+  return leftEfforts.every((effort, index) => {
+    const other = rightEfforts[index]
+    return other !== undefined && effort.id === other.id && effort.name === other.name
+      && effort.description === other.description
+  })
+}
+
+/**
+ * Compare two override records for structural equality.
+ * @param left - first record.
+ * @param right - second record.
+ * @returns whether both name the same departures.
+ */
+export function sameOverrides(left: ModelConfigOverrides, right: ModelConfigOverrides): boolean {
+  if (left === right) return true
+  if (left.contextWindow !== right.contextWindow) return false
+  if (left.maxTokens !== right.maxTokens) return false
+  if (left.reasoningEffort !== right.reasoningEffort) return false
+  const leftModalities = left.inputModalities
+  const rightModalities = right.inputModalities
+  if (leftModalities === undefined || rightModalities === undefined) return leftModalities === rightModalities
+  return leftModalities.length === rightModalities.length
+    && leftModalities.every((modality, index) => rightModalities[index] === modality)
 }

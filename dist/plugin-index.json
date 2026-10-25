@@ -13,12 +13,12 @@
       },
       "versions": [
         {
-          "version": "0.1.0",
-          "publishTimestamp": 1792867759,
+          "version": "0.2.0",
+          "publishTimestamp": 1792928843,
           "source": {
             "type": "git",
             "url": "https://github.com/mzbot-creator/dsh-model-queue",
-            "commit": "c03c8a05cc7e75ce68c003bd809e4bb368f96497"
+            "commit": "bffdba0b60e6508935d83273f90e4f81cc77643b"
           },
           "engines": {
             "node": ">=22.19.0",

@@ -14,12 +14,13 @@ import {
   setEntries,
 } from '../src/queue.ts'
 import type { QueueEntry, QueueState } from '../src/queue.ts'
+import { UNKNOWN_CONFIG } from '../src/model-config.ts'
 
 const HOUR = 60 * 60 * 1000
 
 /** Build one ready entry. */
 function entry(id: string, cooldownUntil = 0, failures = 0): QueueEntry {
-  return { id, provider: 'p', model: id, label: id, cooldownUntil, failures }
+  return { id, provider: 'p', model: id, label: id, snapshot: UNKNOWN_CONFIG, overrides: {}, cooldownUntil, failures }
 }
 
 /** Build a state over the given entries. */

@@ -16,7 +16,16 @@ import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 
 /** Build one queue entry. */
 function entry(id: string, provider = 'p', model = id): QueueEntry {
-  return { id, provider, model, label: id, cooldownUntil: 0, failures: 0 }
+  return {
+    id,
+    provider,
+    model,
+    label: id,
+    snapshot: { inputModalities: ['text'], contextWindow: 200_000, maxTokens: 8_192 },
+    overrides: {},
+    cooldownUntil: 0,
+    failures: 0,
+  }
 }
 
 /** Scripted inner streams, keyed by `provider/model`. */
@@ -66,13 +75,20 @@ function fakeManager(scripts: Record<string, Script>, initial: QueueEntry[]) {
       return state.entries.some(other => other.cooldownUntil === 0) ? 'rotated' : 'exhausted'
     },
     supportsEffort: () => false,
+    /** The fake has no registry to resolve against, so the row's snapshot is the whole truth. */
+    effectiveConfig: (item: QueueEntry) => ({
+      ...item.snapshot,
+      ...item.overrides.contextWindow === undefined ? {} : { contextWindow: item.overrides.contextWindow },
+      ...item.overrides.maxTokens === undefined ? {} : { maxTokens: item.overrides.maxTokens },
+    }),
+    defaultEffort: () => undefined,
     routeFacts: () => ({ inputModalities: ['text'], contextWindow: 100_000 }),
     llm: {
       stream: (options: GenerateOptions): AsyncIterable<StreamChunk> => {
         const key = `${options.provider}/${options.model}`
         calls.push(key)
         const script = scripts[key]
-        const chunks = script === undefined
+        const chunks: readonly StreamChunk[] = script === undefined
           ? [{ type: 'finish', reason: { kind: 'error', failure: { code: 'NO_ADAPTER', message: `no ${key}` } } }]
           : script(options)
         return (async function* () { for (const chunk of chunks) yield chunk })()
@@ -118,7 +134,8 @@ test('the head of the queue answers a request', async () => {
   const adapter = new QueueAdapter(fake.manager, quiet)
   const chunks = await collect(adapter, request())
   assert.deepEqual(fake.calls, ['p/a'])
-  assert.equal(chunks.at(-1)?.type === 'finish' && chunks.at(-1)?.reason.kind, 'stop')
+  const last = chunks.at(-1)
+  assert.equal(last?.type === 'finish' ? last.reason.kind : undefined, 'stop')
   assert.deepEqual(fake.successes, ['a'])
 })
 
@@ -176,7 +193,8 @@ test('cancellation passes through without touching the queue', async () => {
   const adapter = new QueueAdapter(fake.manager, quiet)
   const chunks = await collect(adapter, request())
   assert.deepEqual(fake.rotations, [])
-  assert.equal(chunks.at(-1)?.type === 'finish' ? chunks.at(-1)?.reason.kind : undefined, 'aborted')
+  const abortedLast = chunks.at(-1)
+  assert.equal(abortedLast?.type === 'finish' ? abortedLast.reason.kind : undefined, 'aborted')
 })
 
 test('an empty queue fails with an actionable reason', async () => {

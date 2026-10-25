@@ -5,6 +5,25 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-25
+
+模型配置现在与 dsh 完全对齐，而不是只有一个模型名。
+
+### 新增
+
+- 每个队列成员保存 dsh 解析出的完整模型配置：输入模态（读图）、上下文窗口、单次输出上限、推理等级及其默认档。
+- 新增模型时立刻解析一次完整配置，添加前的预览里就标出这四项。
+- 页面上每个成员显示「生效中的四项配置」，偏离 dsh 的项用绿色标记。
+- `Edit configuration`：逐项覆盖读图能力、上下文窗口、输出上限、推理等级，每项都有说明文字解释作用；`Follow dsh again` 清空覆盖。
+- `Re-sync from dsh` 与 `POST /api/dsh-model-queue/sync`：dsh 侧配置变化后重新解析全部成员，手动覆盖保留。
+- 队列路由对外公布的能力改为成员聚合值：读图需全员支持，上下文与输出上限取最小值，推理等级取交集。
+- 派发时按成员配置下调超过上限的 `maxTokens`；调用方未指定或指定了不受支持的推理档时，回落到该成员的档位。
+- 队列文档版本升到 2，版本 1 的文档仍可读取（旧成员补空配置）。
+
+### 修复
+
+- 之前队列成员只存 `provider` + `model` 字符串，选中后实际派发用的能力全凭猜测，与 dsh 中直接选该模型并不等价。
+
 ## [0.1.0] - 2026-10-25
 
 首个可用版本。
@@ -28,5 +47,6 @@
 - 一个请求内的轮换对上层表现为「这一次请求耗时更长」，没有单独的事件或 UI 提示；轮换痕迹在插件页面与宿主日志里。
 - 队列路由不提供推理档位选择（Effort），每个成员用各自的默认档；调用方显式指定的档位只在成员支持时才转发。
 
-[Unreleased]: https://github.com/mzbot-creator/dsh-model-queue/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/mzbot-creator/dsh-model-queue/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/mzbot-creator/dsh-model-queue/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mzbot-creator/dsh-model-queue/releases/tag/v0.1.0

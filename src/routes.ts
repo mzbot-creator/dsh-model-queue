@@ -1,8 +1,10 @@
 /**
  * The browser-facing API.
  *
- * Three routes under the host's authenticated `/api` channel: read the queue,
- * replace it, and clear cooldowns. They are exact Fetch routes rather than a
+ * Five routes under the host's authenticated `/api` channel: read the queue,
+ * list the models that can be queued (with their complete configuration),
+ * replace the queue, re-sync every row's configuration, set the failure
+ * cooldown, and clear cooldowns. They are exact Fetch routes rather than a
  * Remote namespace, so this plugin needs no generated Typert artifacts and no
  * host build step — the same shape other third-party plugins use.
  *
@@ -17,6 +19,7 @@ import type { QueueManager } from './manager.ts'
 import { MAX_ENTRIES } from './store.ts'
 import { QUEUE_ROUTE } from './contract.ts'
 import type { CatalogView, QueueApiError, QueueView } from './contract.ts'
+import { parseOverrides, parseStoredConfig } from './model-config.ts'
 
 /** The subset of `ctx.connection` these routes use. */
 interface ConnectionLike {
@@ -134,6 +137,14 @@ export function registerRoutes(ctx: Context, manager: QueueManager): () => Promi
     return json(catalog)
   })
 
+  // Re-read every member's configuration from dsh. The page calls this when it
+  // opens, and the "Sync from dsh" button calls it on demand, so a model whose
+  // dsh settings changed is picked up without re-adding the row.
+  register(`${QUEUE_ROUTE}/sync`, ['POST'], async () => {
+    await manager.syncConfigs()
+    return json(manager.view())
+  })
+
   register(`${QUEUE_ROUTE}/entries`, ['POST'], async (request) => {
     const body = await readBody(request)
     const entries = body.entries
@@ -154,11 +165,19 @@ export function registerRoutes(ctx: Context, manager: QueueManager): () => Promi
       if (typeof model !== 'string' || model === '') throw new Error(`entry ${index} needs a model`)
       if (id !== undefined && typeof id !== 'string') throw new Error(`entry ${index} has an invalid id`)
       if (label !== undefined && typeof label !== 'string') throw new Error(`entry ${index} has an invalid label`)
+      // A snapshot is accepted so a reorder can carry the configuration the page
+      // is showing without a second resolve; when it is absent the manager
+      // resolves the row itself, and a malformed one is ignored rather than
+      // rejected, because the route is the authority on what a model is.
+      const snapshot = parseStoredConfig(row.snapshot)
+      const overrides = parseOverrides(row.overrides)
       return {
         provider,
         model,
         ...id === undefined ? {} : { id },
         ...label === undefined ? {} : { label },
+        ...snapshot === undefined ? {} : { snapshot },
+        ...Object.keys(overrides).length === 0 ? {} : { overrides },
       }
     })
     await manager.setEntries(normalized)

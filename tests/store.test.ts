@@ -28,11 +28,33 @@ function sample(revision = 3): QueueState {
         provider: 'deepseek-official',
         model: 'deepseek-v4-flash',
         label: 'DeepSeek V4 Flash',
+        snapshot: {
+          inputModalities: ['text', 'image'],
+          contextWindow: 1_000_000,
+          maxTokens: 65_536,
+          reasoning: {
+            efforts: [
+              { id: 'low', name: 'Low' },
+              { id: 'high', name: 'High' },
+            ],
+            defaultEffort: 'low',
+          },
+        },
+        overrides: { contextWindow: 500_000, reasoningEffort: 'high' },
         cooldownUntil: 1_700_000_000_000,
         failures: 2,
         lastFailure: { code: 'QUOTA', message: 'out of credit', at: 1_699_999_000_000 },
       },
-      { id: 'b', provider: 'od3', model: 'deepseek-v4.1-flash', label: 'OD3 V4.1 Flash', cooldownUntil: 0, failures: 0 },
+      {
+        id: 'b',
+        provider: 'od3',
+        model: 'deepseek-v4.1-flash',
+        label: 'OD3 V4.1 Flash',
+        snapshot: { inputModalities: ['text'], contextWindow: 200_000 },
+        overrides: {},
+        cooldownUntil: 0,
+        failures: 0,
+      },
     ],
   }
 }

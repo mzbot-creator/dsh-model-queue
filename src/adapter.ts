@@ -29,6 +29,7 @@ import type { ReasoningEffortId } from '@deepseek-ai/dsh-llm/brand'
 import type { QueueManager } from './manager.ts'
 import { classifyFailure } from './classify.ts'
 import { PROVIDER_ID, QUEUE_MODEL_ID, QUEUE_MODEL_NAME } from './contract.ts'
+import type { QueueEntry } from './queue.ts'
 
 /**
  * Whether one chunk carries something a session can keep.
@@ -81,6 +82,18 @@ type AttemptResult =
  */
 function queueModelInfo(manager: QueueManager): LlmResolvedModelInfo {
   const facts = manager.routeFacts()
+  const reasoning = facts.reasoning === undefined
+    ? undefined
+    : {
+        efforts: facts.reasoning.efforts.map(effort => ({
+          id: effort.id as ReasoningEffortId,
+          name: effort.name,
+          ...effort.description === undefined ? {} : { description: effort.description },
+        })),
+        ...facts.reasoning.defaultEffort === undefined
+          ? {}
+          : { defaultEffort: facts.reasoning.defaultEffort as ReasoningEffortId },
+      }
   return {
     provider: PROVIDER_ID,
     id: QUEUE_MODEL_ID,
@@ -89,9 +102,11 @@ function queueModelInfo(manager: QueueManager): LlmResolvedModelInfo {
     inputModalities: facts.inputModalities,
     context: { contextWindow: facts.contextWindow },
     ...facts.defaultMaxTokens === undefined ? {} : { defaultMaxTokens: facts.defaultMaxTokens },
-    // Reasoning is a property of the model that actually serves the request, so
-    // the queue route offers no choice of its own: each attempt forwards the
-    // caller's effort only when that member advertises it.
+    // The route offers exactly the levels every member can serve. A member that
+    // lacks a level the caller named falls back to its own default instead of
+    // failing the request, because the level the picker offered came from the
+    // route, not from that member.
+    ...reasoning === undefined ? {} : { reasoning },
     systemPromptUpdate: 'in-history',
     toolUpdate: 'in-history',
   }
@@ -225,7 +240,7 @@ export class QueueAdapter extends LlmAdapter {
       }
       tried.add(entry.id)
 
-      const attempt = yield * this.attempt(options, entry.provider, entry.model)
+      const attempt = yield * this.attempt(options, entry)
       if (attempt.kind === 'aborted') return
       if (attempt.kind === 'ok') {
         await this.manager.recordSuccess(entry)
@@ -267,14 +282,15 @@ export class QueueAdapter extends LlmAdapter {
    */
   private async * attempt(
     options: GenerateOptions,
-    provider: string,
-    model: string,
+    entry: QueueEntry,
   ): AsyncGenerator<StreamChunk, AttemptResult> {
+    const provider = entry.provider
+    const model = entry.model
     const inner: GenerateOptions = {
       ...options,
       provider,
       model,
-      ...this.effortFor(provider, model, options.reasoningEffort),
+      ...this.requestControls(entry, options),
     }
     let failure: AttemptFailure | undefined
     let aborted = false
@@ -314,19 +330,35 @@ export class QueueAdapter extends LlmAdapter {
   }
 
   /**
-   * Preserve the caller's reasoning effort only when the member supports it.
-   * @param provider - member provider route.
-   * @param model - member model id.
-   * @param effort - the effort the loop asked for, if any.
-   * @returns fields to merge into the inner request.
+   * Translate the route-level request into one member's own controls.
+   *
+   * Both controls exist because the queue advertises the *intersection* of its
+   * members: a level or a cap the picker showed may still be one this member
+   * cannot serve. Rather than failing the request on a value the user picked
+   * from the queue's own menu, the member falls back to its declared default.
+   * @param entry - the member the request is being dispatched to.
+   * @param options - the request the loop built for the queue route.
+   * @returns the fields to override on the inner request.
    */
-  private effortFor(
-    provider: string,
-    model: string,
-    effort: ReasoningEffortId | undefined,
-  ): { reasoningEffort?: ReasoningEffortId } {
-    if (effort === undefined) return {}
-    return this.manager.supportsEffort(provider, model, effort) ? { reasoningEffort: effort } : {}
+  private requestControls(
+    entry: QueueEntry,
+    options: GenerateOptions,
+  ): { reasoningEffort?: ReasoningEffortId, maxTokens?: number } {
+    const controls: { reasoningEffort?: ReasoningEffortId, maxTokens?: number } = {}
+    const requested = options.reasoningEffort
+    if (requested !== undefined) {
+      if (this.manager.supportsEffort(entry, requested)) {
+        controls.reasoningEffort = requested
+      } else {
+        const fallback = this.manager.defaultEffort(entry)
+        if (fallback !== undefined) controls.reasoningEffort = fallback as ReasoningEffortId
+      }
+    }
+    const cap = this.manager.effectiveConfig(entry).maxTokens
+    if (cap !== undefined && options.maxTokens !== undefined && options.maxTokens > cap) {
+      controls.maxTokens = cap
+    }
+    return controls
   }
 }
 

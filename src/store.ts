@@ -14,9 +14,20 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { DEFAULT_COOLDOWN_MS, EMPTY_QUEUE, MAX_COOLDOWN_MS } from './queue.ts'
 import type { QueueEntry, QueueFailure, QueueState } from './queue.ts'
+import type { ModelConfigOverrides } from './contract.ts'
+import { UNKNOWN_CONFIG, parseOverrides, parseStoredConfig } from './model-config.ts'
 
-/** On-disk document version; bump only with a migration. */
-const FORMAT_VERSION = 1
+/**
+ * On-disk document version.
+ *
+ * Version 2 added each entry's `snapshot` and `overrides`; a version 1 document
+ * is migrated on read (its rows simply have no recorded configuration), so an
+ * existing queue survives the upgrade instead of being quarantined.
+ */
+const FORMAT_VERSION = 2
+
+/** The version whose document this build can still read. */
+const LEGACY_FORMAT_VERSION = 1
 
 /** Maximum accepted entries, so a hostile or buggy client cannot grow the file without bound. */
 export const MAX_ENTRIES = 64
@@ -92,9 +103,26 @@ export function parseEntry(value: unknown): QueueEntry {
     provider: requiredString(record.provider, 'entry.provider'),
     model: requiredString(record.model, 'entry.model'),
     label: requiredString(record.label, 'entry.label', MAX_LABEL),
+    snapshot: parseStoredConfig(record.snapshot) ?? UNKNOWN_CONFIG,
+    overrides: parseStoredOverrides(record.overrides),
     cooldownUntil,
     ...lastFailure === undefined ? {} : { lastFailure },
     failures,
+  }
+}
+
+/**
+ * Read a stored override record, rejecting values the routes would also reject.
+ * @param value - candidate value from the document.
+ * @returns the accepted overrides; empty when absent or unusable.
+ */
+function parseStoredOverrides(value: unknown): ModelConfigOverrides {
+  try {
+    return parseOverrides(value)
+  } catch {
+    // A hand-edited document must not take the whole queue down; the row falls
+    // back to following its route, which is the safe default.
+    return {}
   }
 }
 
@@ -107,7 +135,7 @@ export function parseEntry(value: unknown): QueueEntry {
 export function parseDocument(value: unknown): QueueState {
   if (typeof value !== 'object' || value === null) throw new Error('the queue document must be an object')
   const record = value as Record<string, unknown>
-  if (record.version !== FORMAT_VERSION) {
+  if (record.version !== FORMAT_VERSION && record.version !== LEGACY_FORMAT_VERSION) {
     throw new Error(`unsupported queue document version ${String(record.version)}; expected ${FORMAT_VERSION}`)
   }
   const revision = record.revision ?? 0

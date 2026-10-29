@@ -32,8 +32,11 @@ test('an empty queue advertises text only and no capacities', () => {
   assert.deepEqual(aggregateRouteConfig([]), { inputModalities: ['text'] })
 })
 
-test('a single member is advertised exactly as dsh reports it', () => {
-  assert.deepEqual(aggregateRouteConfig([multimodal]), multimodal)
+test('a single member is advertised as dsh reports it, minus the levels', () => {
+  // Reasoning is the one field the route does not aggregate: it ignores the
+  // level a call names, so the manager publishes the harness vocabulary instead.
+  const { reasoning: _levels, ...expected } = multimodal
+  assert.deepEqual(aggregateRouteConfig([multimodal]), expected)
 })
 
 test('images require every member to accept them', () => {
@@ -47,28 +50,18 @@ test('the window and the output cap take the smallest member', () => {
   assert.equal(route.maxTokens, 32_000)
 })
 
-test('only reasoning levels every member offers survive', () => {
-  const route = aggregateRouteConfig([multimodal, textOnly])
-  assert.deepEqual(route.reasoning?.efforts.map(effort => effort.id), ['low'])
-  // `high` was multimodal's default and textOnly does not offer it, so the
-  // aggregate cannot claim a default the rotation might not honour.
-  assert.equal(route.reasoning?.defaultEffort, undefined)
-})
-
-test('a shared default effort is kept', () => {
-  const route = aggregateRouteConfig([multimodal, { ...textOnly, reasoning: { efforts: multimodal.reasoning?.efforts ?? [], defaultEffort: 'high' } }])
-  assert.equal(route.reasoning?.defaultEffort, 'high')
-})
-
-test('a member with no reasoning at all removes the advertised levels', () => {
-  const route = aggregateRouteConfig([multimodal, { inputModalities: ['text'], contextWindow: 1000 }])
-  assert.equal(route.reasoning, undefined)
+test('reasoning levels are never aggregated', () => {
+  // Intersecting them would advertise a set that narrows whenever a member's
+  // facts go stale or lack a level, and the harness then refuses the call over
+  // a value this route discards anyway.
+  assert.equal(aggregateRouteConfig([multimodal]).reasoning, undefined)
+  assert.equal(aggregateRouteConfig([multimodal, textOnly]).reasoning, undefined)
+  assert.equal(aggregateRouteConfig([multimodal, { inputModalities: ['text'], contextWindow: 1000 }]).reasoning, undefined)
 })
 
 test('an unknown member makes the whole route conservative', () => {
   const route = aggregateRouteConfig([multimodal, { inputModalities: [] }])
   assert.deepEqual(route.inputModalities, ['text'])
-  assert.equal(route.reasoning, undefined)
 })
 
 test('overrides narrow a member without touching the others', () => {

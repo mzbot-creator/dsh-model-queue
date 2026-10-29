@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-29
+
+### 修复
+
+- **切到队列模型后报 `UNSUPPORTED_REASONING_EFFORT`（provider "dsh-model-queue" model "queue" does not support reasoning effort "max"）**：队列路由原来公布「所有成员推理等级的交集」，交集随成员变化而收窄（某个成员不支持 `max`，或成员配置缓存过期时甚至为空），而会话里存着的档位仍会被下发，宿主编排阶段直接拒掉整轮请求。现在路由固定公布 dsh 的全部 7 档（`off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`）且不设默认档，任何存量档位都不会被拒。
+- **队列模式下图片超限无法自愈，报 `IMAGE_OFFLOAD_REQUIRED`（pi-ai request images exceed the 20971520-byte base64 bound）**：适配器转发成员失败时只保留 `code` 和 `message`，把 `offloadImages`（以及 `status`、`providerRetryAfterMs`、`requestId`）丢掉了，`dsh-compaction-image-offload` 拿不到要腾出的张数只能放弃。现在失败对象原样透传；`finish` 事件与抛出的 `LlmError` 两条路径都保留完整记录。
+
+### 变更
+
+- 派发到成员时**丢弃**调用方指定的 `reasoningEffort`：队列不使用档位，成员一律跑自己的默认档。每行 `Edit configuration` 里设的推理等级仍然生效，但只在成员确实支持该档时才转发。
+- 队列路由不再聚合推理等级（`aggregateRouteConfig` 不再输出 `reasoning`），由 manager 统一附上全集。
+- 页面文案同步：路由能力表里推理等级一项显示为「已忽略」，图例与字段说明改为「会话传来的档位一律丢弃」。
+
 ## [0.2.0] - 2026-10-25
 
 模型配置现在与 dsh 完全对齐，而不是只有一个模型名。

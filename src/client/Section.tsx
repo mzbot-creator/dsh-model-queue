@@ -198,15 +198,16 @@ const TEXT = {
     legendOutput: '单次输出上限',
     legendOutputBody: '一次回复最多能生成多少 token。默认沿用 dsh；调小之后，派发给这个成员的请求如果要求更大的输出，会被自动下调到这个值。',
     legendReasoning: '推理等级',
-    legendReasoningBody: '该模型提供的推理档位（例如 Low / Medium / High）。默认沿用 dsh 的默认档；选定一档后，调用方没有指定档位（或指定了该成员不支持的档位）时就用它。',
-    legendFollow: '四项都默认“沿用 dsh”：dsh 里的模型声明改了，点一次 Re-sync from dsh 即可同步，不必删除重加。只有你手动改过的项不同，并会标绿。',
-    routeHint: '队列在模型选择器里只出现一个 "Model Queue"。它对外公布的读图能力、上下文窗口、输出上限和推理等级，按所有成员的“共同可用范围”计算：读图要求每个成员都支持，上下文与输出取最小成员的值，推理等级取所有成员都提供的交集。因此任何一次轮转都不会把请求交给接不住的模型。',
+    legendReasoningBody: '该模型自己的推理档位（例如 Low / Medium / High）。默认沿用 dsh 的默认档；选定一档后，队列派发到这个成员时就用它。会话/选择器传来的档位一律被丢弃，不会下发到成员。',
+    legendFollow: '前三项都默认“沿用 dsh”：dsh 里的模型声明改了，点一次 Re-sync from dsh 即可同步，不必删除重加。只有你手动改过的项不同，并会标绿。',
+    routeHint: '队列在模型选择器里只出现一个 "Model Queue"。它对外公布的读图能力、上下文窗口和输出上限按所有成员的“共同可用范围”计算：读图要求每个成员都支持，上下文与输出取最小成员的值。推理等级例外：队列不使用档位（派发时直接丢弃），因此固定公布 dsh 的全部档位，选择器里选哪一档都不影响实际行为。',
     capImage: '读图',
     capImageYes: '支持',
     capImageNo: '不支持',
     capContext: '上下文',
     capOutput: '单次输出上限',
     capReasoning: '推理等级',
+    capReasoningIgnored: '已忽略（任意档位都接受）',
     capDefault: '默认',
     capUnknown: '未知（路由未响应）',
     capNotDeclared: '未声明',
@@ -225,7 +226,7 @@ const TEXT = {
     fieldOutput: '单次输出上限（token）',
     fieldOutputHint: '一次回复最多生成多少 token。dsh 当前给出 {value}。留空表示沿用 dsh；队列派发到该成员时，超过这个值的 maxTokens 会被下调到该值。',
     fieldReasoning: '模型推理等级',
-    fieldReasoningHint: '这个模型可选用的推理强度。dsh 当前提供 {value}，默认 {default}。留空表示沿用 dsh 的默认值；选定后，当调用方没有指定等级（或指定的等级该成员不支持）时使用这一档。',
+    fieldReasoningHint: '这个模型自己的推理强度。dsh 当前提供 {value}，默认 {default}。留空表示沿用 dsh 的默认值；选定后，队列派发到这个成员时就用这一档——会话里选了什么都会被丢弃。',
     fieldReasoningNone: '该模型没有声明推理等级',
     inherit: '沿用 dsh 配置',
     imageInherit: '沿用 dsh（{value}）',
@@ -285,15 +286,16 @@ const TEXT = {
     legendOutput: 'Output cap',
     legendOutputBody: 'How many tokens one reply may generate. Follows dsh by default; once lowered, a request that asks for more output is reduced to this value when it is dispatched to this member.',
     legendReasoning: 'Reasoning level',
-    legendReasoningBody: 'The reasoning efforts this model offers (for example Low / Medium / High). Follows the dsh default by default; once you pick one, it is used whenever the caller names no level, or names one this member does not support.',
-    legendFollow: 'All four follow dsh by default: when a model declaration in dsh changes, one click on Re-sync from dsh brings the queue up to date without re-adding the row. Only the fields you changed differ, and they are marked green.',
-    routeHint: 'The queue appears as one "Model Queue" in the picker. The image support, context window, output cap and reasoning levels it advertises are the intersection of its members: images require every member to accept them, context and output use the smallest member, and reasoning levels are the ones every member offers. That is why a rotation can never hand a request to a member that cannot serve it.',
+    legendReasoningBody: 'The reasoning efforts this model offers (for example Low / Medium / High). Follows the dsh default by default; once you pick one, it is used whenever the queue dispatches to this member. A level named by the session or the picker is always dropped, never forwarded.',
+    legendFollow: 'The first three follow dsh by default: when a model declaration in dsh changes, one click on Re-sync from dsh brings the queue up to date without re-adding the row. Only the fields you changed differ, and they are marked green.',
+    routeHint: 'The queue appears as one "Model Queue" in the picker. The image support, context window and output cap it advertises are the intersection of its members: images require every member to accept them, context and output use the smallest member. Reasoning is the exception: the route does not use a level (a dispatch drops it), so it always advertises every level dsh knows — whichever one the picker shows has no effect.',
     capImage: 'Images',
     capImageYes: 'yes',
     capImageNo: 'no',
     capContext: 'context',
     capOutput: 'output cap',
     capReasoning: 'reasoning',
+    capReasoningIgnored: 'ignored (any level accepted)',
     capDefault: 'default',
     capUnknown: 'unknown (route did not answer)',
     capNotDeclared: 'not declared',
@@ -312,7 +314,7 @@ const TEXT = {
     fieldOutput: 'Output cap (tokens)',
     fieldOutputHint: 'How many tokens one reply may generate. dsh currently reports {value}. Leave empty to follow dsh; when a request is dispatched to this member, a larger maxTokens is lowered to this value.',
     fieldReasoning: 'Reasoning level',
-    fieldReasoningHint: 'The reasoning effort this model offers. dsh currently offers {value}, defaulting to {default}. Leave empty to follow dsh; once chosen, it is used whenever the caller names no level (or names one this member does not support).',
+    fieldReasoningHint: 'The reasoning effort this model offers. dsh currently offers {value}, defaulting to {default}. Leave empty to follow dsh; once chosen, the queue uses it whenever it dispatches to this member — a level named by the session is dropped.',
     fieldReasoningNone: 'This model declares no reasoning levels',
     inherit: 'Follow dsh',
     imageInherit: 'Follow dsh ({value})',
@@ -392,8 +394,10 @@ function CapBadges(props: {
   readonly overrides: ModelConfigOverrides
   readonly unknown: boolean
   readonly t: Strings
+  /** Replaces the reasoning text; the route advertises a set it never uses. */
+  readonly reasoningText?: string
 }) {
-  const { config, overrides, unknown, t } = props
+  const { config, overrides, unknown, t, reasoningText } = props
   const unknownText = t.capUnknown
   return (
     <div style={styles.caps}>
@@ -409,7 +413,9 @@ function CapBadges(props: {
         {t.capOutput}: {tokens(config.maxTokens, unknown ? unknownText : t.capNotDeclared)}
       </span>
       <span style={overrides.reasoningEffort === undefined ? styles.cap : styles.capEdited}>
-        {t.capReasoning}: {unknown && config.reasoning === undefined ? unknownText : reasoningSummary(config, t)}
+        {t.capReasoning}: {unknown && config.reasoning === undefined
+          ? unknownText
+          : reasoningText ?? reasoningSummary(config, t)}
       </span>
     </div>
   )
@@ -637,7 +643,13 @@ export function ModelQueueSection(props: ModelQueueSectionInjected) {
           <div style={{ marginTop: 12 }}>
             <div style={{ ...styles.label, marginBottom: 4 }}>{t.routeTitle}</div>
             <p style={{ ...styles.fieldHint, margin: '0 0 6px' }}>{t.routeHint}</p>
-            <CapBadges config={view.route} overrides={{}} unknown={view.entries.length === 0} t={t} />
+            <CapBadges
+              config={view.route}
+              overrides={{}}
+              unknown={view.entries.length === 0}
+              reasoningText={t.capReasoningIgnored}
+              t={t}
+            />
           </div>
         )}
       </section>

@@ -31,7 +31,7 @@ import type {
   QueueEntryView,
   QueueView,
 } from './contract.ts'
-import { PROVIDER_ID, QUEUE_MODEL_ID } from './contract.ts'
+import { PROVIDER_ID, QUEUE_MODEL_ID, ROUTE_REASONING_EFFORTS } from './contract.ts'
 import { UNKNOWN_CONFIG, aggregateRouteConfig, applyOverrides, configFromListing, configFromResolved } from './model-config.ts'
 
 /** What the queue route advertises to the loop, derived from the current members. */
@@ -421,24 +421,11 @@ export class QueueManager {
   /**
    * Whether a member accepts one reasoning effort.
    * @param entry - the member.
-   * @param effort - the effort the queue route was asked for.
+   * @param effort - the row-level level the adapter is about to forward.
    * @returns `true` when the member's effective configuration offers it.
    */
   supportsEffort(entry: QueueEntry, effort: string): boolean {
     return this.effectiveConfig(entry).reasoning?.efforts.some(level => level.id === effort) ?? false
-  }
-
-  /**
-   * The reasoning level a member should use when the caller named none.
-   *
-   * Order: the row's own override, then the model's declared default. A model
-   * with no reasoning support returns `undefined`, which is what the adapter
-   * needs in order to leave the request untouched.
-   * @param entry - the member.
-   * @returns the effort id, when one applies.
-   */
-  defaultEffort(entry: QueueEntry): string | undefined {
-    return this.effectiveConfig(entry).reasoning?.defaultEffort
   }
 
   /**
@@ -460,10 +447,20 @@ export class QueueManager {
    * already falls back to the snapshot a row captured, so a cold resolve cache
    * (a fresh boot, a page load before any request) still aggregates what dsh
    * last said instead of advertising nothing at all.
+   *
+   * Reasoning levels are the one exception: the adapter strips the level a call
+   * names, so the route advertises the harness's whole vocabulary rather than
+   * the members' intersection. The intersection would be a claim the route does
+   * not honour — and a dangerous one, since the harness refuses a call whose
+   * level the resolved model omits.
    * @returns the advertised configuration.
    */
   routeConfig(): ModelConfig {
-    return aggregateRouteConfig(this.state().entries.map(entry => this.effectiveConfig(entry)))
+    const aggregate = aggregateRouteConfig(this.state().entries.map(entry => this.effectiveConfig(entry)))
+    return {
+      ...aggregate,
+      reasoning: { efforts: [...ROUTE_REASONING_EFFORTS] },
+    }
   }
 
   /**

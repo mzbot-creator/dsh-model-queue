@@ -109,6 +109,13 @@ try {
   const view = await state.json()
   if (view.provider !== pkg.name || view.model !== 'queue') fail(`unexpected queue view ${JSON.stringify(view).slice(0, 200)}`)
   if (!Array.isArray(view.entries)) fail('the queue view carries no entries array')
+  // The route must never narrow its advertised levels: a stored selection the
+  // route omits fails the whole turn with UNSUPPORTED_REASONING_EFFORT.
+  const levels = view.route?.reasoning?.efforts
+  if (!Array.isArray(levels) || levels.length !== 7) {
+    fail(`the route advertises ${String(levels?.length)} reasoning level(s), expected all 7: ${JSON.stringify(levels)}`)
+  }
+  if (view.route.reasoning.defaultEffort !== undefined) fail('the route advertises a default reasoning level it does not use')
 
   console.log(`plugin-smoke: ${pkg.name}@${pkg.version} installed, activated, and served its API`)
 } catch (error) {

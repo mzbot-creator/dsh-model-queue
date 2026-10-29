@@ -51,6 +51,27 @@ export interface ModelReasoning {
 }
 
 /**
+ * Every reasoning level the harness vocabulary defines, least to greatest.
+ *
+ * The queue route advertises this whole set instead of the intersection of its
+ * members. The route does not *use* a level: a dispatch drops whatever level
+ * the caller named and lets each member run on its own (or on the level its row
+ * pins). Advertising the full set is therefore the honest, stable answer, and
+ * it is also the safe one — the harness rejects a call whose level the route
+ * does not offer, so a route that narrowed its set would fail a request that
+ * still carries a level some earlier selection stored.
+ */
+export const ROUTE_REASONING_EFFORTS: readonly ModelReasoningEffort[] = Object.freeze([
+  { id: 'off', name: 'Off' },
+  { id: 'minimal', name: 'Minimal' },
+  { id: 'low', name: 'Low' },
+  { id: 'medium', name: 'Medium' },
+  { id: 'high', name: 'High' },
+  { id: 'xhigh', name: 'Xhigh' },
+  { id: 'max', name: 'Max' },
+])
+
+/**
  * The complete configuration of one model, exactly as the harness resolves it.
  *
  * This is deliberately the harness's own vocabulary rather than a private copy:

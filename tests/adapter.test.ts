@@ -33,8 +33,15 @@ type Script = (options: GenerateOptions) => StreamChunk[]
 
 /**
  * A manager stand-in that records what the adapter asked of it.
+ * @param scripts - one scripted stream per `provider/model`.
+ * @param initial - the queue's starting entries.
+ * @param effort - how members answer the row-level effort check; absent means "never".
  */
-function fakeManager(scripts: Record<string, Script>, initial: QueueEntry[]) {
+function fakeManager(
+  scripts: Record<string, Script>,
+  initial: QueueEntry[],
+  effort: { supports?: (effort: string) => boolean } = {},
+) {
   let state: QueueState = { revision: 0, cooldownMs: 3_600_000, entries: [...initial] }
   const calls: string[] = []
   const rotations: { id: string, code: string }[] = []
@@ -74,14 +81,14 @@ function fakeManager(scripts: Record<string, Script>, initial: QueueEntry[]) {
       // same way `selectEntry` does.
       return state.entries.some(other => other.cooldownUntil === 0) ? 'rotated' : 'exhausted'
     },
-    supportsEffort: () => false,
+    supportsEffort: (_item: QueueEntry, value: string) => effort.supports?.(value) ?? false,
     /** The fake has no registry to resolve against, so the row's snapshot is the whole truth. */
     effectiveConfig: (item: QueueEntry) => ({
       ...item.snapshot,
       ...item.overrides.contextWindow === undefined ? {} : { contextWindow: item.overrides.contextWindow },
       ...item.overrides.maxTokens === undefined ? {} : { maxTokens: item.overrides.maxTokens },
     }),
-    defaultEffort: () => undefined,
+    overridesOf: (item: QueueEntry) => item.overrides,
     routeFacts: () => ({ inputModalities: ['text'], contextWindow: 100_000 }),
     llm: {
       stream: (options: GenerateOptions): AsyncIterable<StreamChunk> => {
@@ -225,3 +232,106 @@ test('a zero cooldown cannot make one request loop forever', async () => {
   assert.equal(chunks.at(-1)?.type, 'finish')
   assert.deepEqual(fake.calls, ['p/a'])
 })
+
+test('the queue advertises every reasoning level the harness knows', async () => {
+  // A narrowed set is what made a stored `max` fail the request: the harness
+  // refuses a level the resolved model does not list.
+  const fake = fakeManager({}, [entry('a', 'p')])
+  const adapter = new QueueAdapter(fake.manager, quiet)
+  const info = await adapter.resolveModel('dsh-model-queue', 'queue')
+  const ids = info.reasoning?.efforts.map(effort => effort.id) ?? []
+  assert.deepEqual(ids, ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+  // No default: a level the call named is dropped, so the queue must not invent one.
+  assert.equal(info.reasoning?.defaultEffort, undefined)
+})
+
+test('a caller-named reasoning level is dropped, not forwarded to the member', async () => {
+  const seen: (string | undefined)[] = []
+  const fake = fakeManager({
+    'p/a': (options) => {
+      seen.push(options.reasoningEffort)
+      return ok('fine')
+    },
+  }, [entry('a', 'p')])
+  const adapter = new QueueAdapter(fake.manager, quiet)
+  const chunks = await collect(adapter, { ...request(), reasoningEffort: 'max' as never })
+  assert.equal(chunks.at(-1)?.type === 'finish' ? chunks.at(-1)?.type : undefined, 'finish')
+  assert.deepEqual(fake.calls, ['p/a'])
+  // The member runs on its own default, whatever the picker showed for the queue.
+  assert.deepEqual(seen, [undefined])
+})
+
+test("a row's own reasoning override still reaches the member", async () => {
+  const seen: (string | undefined)[] = []
+  const pinned = { ...entry('a', 'p'), overrides: { reasoningEffort: 'low' } }
+  const fake = fakeManager({
+    'p/a': (options) => {
+      seen.push(options.reasoningEffort)
+      return ok('fine')
+    },
+  }, [pinned], { supports: () => true })
+  const adapter = new QueueAdapter(fake.manager, quiet)
+  await collect(adapter, { ...request(), reasoningEffort: 'max' as never })
+  // The row pins `low`; the caller's `max` is ignored either way.
+  assert.deepEqual(seen, ['low'])
+})
+
+test('a row override the member does not offer is not forwarded', async () => {
+  const seen: (string | undefined)[] = []
+  const pinned = { ...entry('a', 'p'), overrides: { reasoningEffort: 'low' } }
+  const fake = fakeManager({
+    'p/a': (options) => {
+      seen.push(options.reasoningEffort)
+      return ok('fine')
+    },
+  }, [pinned], { supports: () => false })
+  const adapter = new QueueAdapter(fake.manager, quiet)
+  await collect(adapter, { ...request(), reasoningEffort: 'max' as never })
+  // Forwarding it would fail the call with UNSUPPORTED_REASONING_EFFORT.
+  assert.deepEqual(seen, [undefined])
+})
+
+test('the member failure keeps its full record, including offloadImages', async () => {
+  // Rebuilding a code/message-only object here is what broke the image-offload
+  // recovery: the recovery reads `offloadImages` and gave up without it.
+  const fake = fakeManager({
+    'p/a': () => [{
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: { code: 'IMAGE_OFFLOAD_REQUIRED', message: 'too big', offloadImages: 21, status: 413 },
+      },
+    }],
+  }, [entry('a', 'p')])
+  const adapter = new QueueAdapter(fake.manager, quiet)
+  const chunks = await collect(adapter, request())
+  const finish = chunks.at(-1)
+  assert.equal(finish?.type, 'finish')
+  if (finish?.type !== 'finish' || finish.reason.kind !== 'error') {
+    assert.fail('expected one terminal error')
+    return
+  }
+  assert.equal(finish.reason.failure.offloadImages, 21)
+  assert.equal(finish.reason.failure.status, 413)
+})
+
+test('a thrown LlmError keeps its carried failure record', async () => {
+  const fake = fakeManager({}, [entry('a', 'p')])
+  const original = fake.manager.llm.stream
+  ;(fake.manager as unknown as { llm: { stream: unknown } }).llm.stream = () => {
+    throw Object.assign(new Error('boom'), {
+      failure: { code: 'PROVIDER_OVERLOADED', message: 'busy', status: 503, providerRetryAfterMs: 1_000 },
+    })
+  }
+  void original
+  const adapter = new QueueAdapter(fake.manager, quiet)
+  const chunks = await collect(adapter, request())
+  const finish = chunks.at(-1)
+  if (finish?.type !== 'finish' || finish.reason.kind !== 'error') {
+    assert.fail('expected one terminal error')
+    return
+  }
+  assert.equal(finish.reason.failure.providerRetryAfterMs, 1_000)
+  assert.equal(finish.reason.failure.status, 503)
+})
+

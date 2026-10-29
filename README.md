@@ -7,10 +7,10 @@
 ## 装
 
 ```sh
-dsh plugin --profile web add github:mzbot-creator/dsh-model-queue#v0.2.0
+dsh plugin --profile web add github:mzbot-creator/dsh-model-queue#v0.2.1
 ```
 
-`#v0.2.0` 把版本钉在 tag 上，所以装到的东西可复现；省略它则跟 `main` 头走。
+`#v0.2.1` 把版本钉在 tag 上，所以装到的东西可复现；省略它则跟 `main` 头走。
 
 **不要用 release 里的 `.tgz` 链接装**：dsh 的 profile 固定用 `nodeLinker: hoisted`，而
 pnpm 10 在这个模式下装远程 tarball URL 会报 `ERR_PNPM_MISSING_TARBALL_INTEGRITY`
@@ -77,15 +77,23 @@ git 依赖的 prepare 脚本）。
 | 读图 | 全员支持才算支持 | 否则轮换到纯文本成员时，图片会被拒或静默丢失 |
 | 上下文窗口 | 取最小的成员 | 乐观值会让宿主拼出一个某成员接不住的请求，轮换后报用户无法处理的错 |
 | 单次输出上限 | 取最小的成员 | 同上；超出的 `maxTokens` 会在派发时下调到该成员的上限 |
-| 推理等级 | 所有成员都提供的交集 | 公布一个只有部分成员支持的档位，等于把选择权变成随机失败 |
+| 推理等级 | 固定公布 dsh 的**全部** 7 档，且不设默认档 | 队列根本不用档位（派发时直接丢弃），公布交集反而会因某个成员缺档或配置缓存过期而收窄，宿主随即以 `UNSUPPORTED_REASONING_EFFORT` 拒掉整个请求 |
 
-页面上「Queue route effective」这一行就是这套聚合值，和模型卡片里看到的一致。
+页面上「Queue route effective」这一行就是这套聚合值，和模型卡片里看到的一致；推理等级一项显示为「已忽略」。
+
+**推理等级为什么被忽略。** 会话里存着的档位（比如 `max`）会直接下发到队列路由。路由若不接受，宿主编排阶段就会失败，一个跟实际行为无关的值能废掉整轮对话。所以队列统一这么做：
+
+1. 公布全部档位，任何存量档位都不会被拒；
+2. 派发到成员时**把 `reasoningEffort` 整个丢掉**，让成员跑它自己的默认档；
+3. 每行自己的「推理等级」覆盖仍然生效——那是你给这个成员显式配的，不随会话漂移。
+
+选择器里因此会看到 7 个档位选项，选哪个都不影响实际行为，这是刻意的取舍。
 
 **逐项覆盖。** 每项都可以只改这一个成员，不影响别人：
 
 - **读图**：强制支持或强制纯文本。想让某个成员永远不接图片，就关掉它。
 - **上下文窗口 / 输出上限**：改成更保守的值。队列对外公布的总值会随之收紧。
-- **推理等级**：指定这个成员在调用方没指定档位（或指定的档位它不支持）时用哪一档。这是「每个成员用自己的默认档」之外唯一的调节手段。
+- **推理等级**：把这一行固定到某个档位。会话传来的档位一律被丢弃，所以这就是该成员实际使用的档位（前提是它确实支持该档，否则不转发）。
 
 改过的项会一直保留，重新同步也不会被覆盖；`Follow dsh again` 清空该成员的全部覆盖。
 
@@ -99,6 +107,8 @@ git 依赖的 prepare 脚本）。
 
 > 默认倾向「换」是刻意的：未识别的错误码更可能是 provider 新出的故障，而不是新的请求形状错误；而错误轮换的代价是自愈的——冷却结束后它自己就回来了。
 
+**失败对象原样透传。** 成员的失败不只带 `code` 和 `message`：`offloadImages`、`status`、`providerRetryAfterMs`、`requestId` 都会一起交给宿主。`offloadImages` 尤其关键——`dsh-compaction-image-offload` 靠它知道要为图片腾出多少空间再重试；插件早期只抄了前两个字段，导致队列模式下的图片超限无法自愈，宿主直接报 `IMAGE_OFFLOAD_REQUIRED`。现在无论失败来自终止事件还是抛出的 `LlmError`，都保留完整记录。
+
 ## 它怎么做到的
 
 Harness 是「一个会话选一个模型」。插件注册**一条自己的 provider 路由**（`dsh-model-queue`，只公布一个模型 `queue`），然后在每次分发时：
@@ -111,7 +121,7 @@ Harness 是「一个会话选一个模型」。插件注册**一条自己的 pro
 
 几个刻意的取舍：
 
-- **队列路由公布的能力取成员交集**，图片能力取「所有成员都支持」才算数；而每个成员自己的配置来自 dsh 的解析结果，不是手填的字符串——这是「选了名字但行为不一致」的根因。
+- **除推理档位外，队列路由公布的能力取成员交集**，图片能力取「所有成员都支持」才算数；而每个成员自己的配置来自 dsh 的解析结果，不是手填的字符串——这是「选了名字但行为不一致」的根因。推理档位反其道而行：公布全集、派发时丢弃（见上文）。
 - **失败尝试的残缺输出不会交给会话**。否则它会被存成 assistant 消息，然后在一段半截内容上继续重试。
 - **冷却时长是插件配置（`cooldownMs`），不是队列文档的一部分**，改设置不需要重写你排好的队列；`0` 仍然会轮换到队尾，只是不等待。
 - **空队列默认不公布路由**。一个选得到、但必然失败的模型选项比没有更糟。想要的话可以在页面里打开 `Offer the route even when empty`。
@@ -162,14 +172,14 @@ npm run verify:load # 装进临时 profile、真的启动一次、查 API
 打一个与 `package.json` 版本一致的 tag 并推送：
 
 ```sh
-git tag -a v0.2.0 -m "0.2.0" && git push origin v0.2.0
+git tag -a v0.2.1 -m "0.2.1" && git push origin v0.2.1
 ```
 
 Release 工作流会校验 tag 与版本号一致、跑全部检查（含真的启动一次 harness）、
 `npm pack`，然后把 `.tgz` 挂到 GitHub Release 上。装这个版本仍然是 tag 一条命令：
 
 ```sh
-dsh plugin --profile web add github:mzbot-creator/dsh-model-queue#v0.2.0
+dsh plugin --profile web add github:mzbot-creator/dsh-model-queue#v0.2.1
 ```
 
 `npm publish` 是可选渠道：它需要仓库里配 `NPM_TOKEN`。本仓库没有配，所以工作流会
@@ -196,6 +206,7 @@ dsh plugin --profile web add github:mzbot-creator/dsh-model-queue#v0.2.0
 
 **未验证**：
 
+- 0.2.1 的两个修复（公布全部推理档位、失败记录原样透传）只过了单元测试与装载冒烟，**没有在真实会话里复现过原始报错再验证消失**；`UNSUPPORTED_REASONING_EFFORT` 与 `IMAGE_OFFLOAD_REQUIRED` 都没有真的重新触发过
 - 只有 `0.2.1-rc.3` 一个宿主版本上跑过；更早的 `0.2.0-rc.x` 只做了类型层面的兼容（`engines.dsh` 写的是 `>=0.2.0-rc.1 <0.3.0`）
 - 插件市场索引（`dist/plugin-index.json`）会生成本仓库的描述，但尚未发布到任何公开索引源
 - 真实 provider 的**额度耗尽**没有真的打到过；轮换路径是用「不存在的路由」和「缺凭据的路由」触发的，它们与 `QUOTA` 走同一条分类分支

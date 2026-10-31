@@ -19,7 +19,7 @@ import type { QueueManager } from './manager.ts'
 import { MAX_ENTRIES } from './store.ts'
 import { QUEUE_ROUTE } from './contract.ts'
 import type { CatalogView, QueueApiError, QueueView } from './contract.ts'
-import { parseOverrides, parseStoredConfig } from './model-config.ts'
+import { parseStoredConfig } from './model-config.ts'
 
 /** The subset of `ctx.connection` these routes use. */
 interface ConnectionLike {
@@ -167,23 +167,16 @@ export function registerRoutes(ctx: Context, manager: QueueManager): () => Promi
       if (typeof model !== 'string' || model === '') throw new Error(`entry ${index} needs a model`)
       if (id !== undefined && typeof id !== 'string') throw new Error(`entry ${index} has an invalid id`)
       if (label !== undefined && typeof label !== 'string') throw new Error(`entry ${index} has an invalid label`)
-      // A snapshot is accepted so a reorder can carry the configuration the page
-      // is showing without a second resolve; when it is absent the manager
-      // resolves the row itself, and a malformed one is ignored rather than
-      // rejected, because the route is the authority on what a model is.
-      const snapshot = parseStoredConfig(row.snapshot)
-      const overrides = parseOverrides(row.overrides)
+      // The configuration travels with the row so an edit, a reorder and an add
+      // all say the same thing: here is this member's complete configuration.
+      // Absent means "keep what is stored", which is what a bare reorder sends.
+      const config = parseStoredConfig(row.config)
       return {
         provider,
         model,
         ...id === undefined ? {} : { id },
         ...label === undefined ? {} : { label },
-        ...snapshot === undefined ? {} : { snapshot },
-        // Forwarded even when empty: `{}` is the caller saying "follow dsh
-        // again", which must be able to clear overrides a row already carries.
-        // A caller that omits the key entirely (a bare reorder) keeps them, so
-        // the distinction between absent and empty is load-bearing.
-        ...'overrides' in row ? { overrides } : {},
+        ...config === undefined ? {} : { config },
       }
     })
     await manager.setEntries(normalized)

@@ -20,7 +20,7 @@ const HOUR = 60 * 60 * 1000
 
 /** Build one ready entry. */
 function entry(id: string, cooldownUntil = 0, failures = 0): QueueEntry {
-  return { id, provider: 'p', model: id, label: id, snapshot: UNKNOWN_CONFIG, overrides: {}, cooldownUntil, failures }
+  return { id, provider: 'p', model: id, label: id, config: UNKNOWN_CONFIG, cooldownUntil, failures }
 }
 
 /** Build a state over the given entries. */
@@ -168,25 +168,25 @@ test('changing the cooldown applies to the next failure only', () => {
   assert.equal(after.entries[0]?.cooldownUntil, 1010)
 })
 
-test('an empty overrides object clears a row back to the dsh configuration', () => {
-  const configured = setEntries(
-    state(),
-    [{ id: 'a', provider: 'p', model: 'a', overrides: { contextWindow: 1000 } }],
-    [],
-  )
-  assert.deepEqual(configured.entries[0]?.overrides, { contextWindow: 1000 })
-  // `{}` is the page saying "follow dsh again"; omitting the key is a reorder
-  // that must leave the stored overrides alone.
-  const cleared = setEntries(configured, [{ id: 'a', provider: 'p', model: 'a', overrides: {} }], [])
-  assert.deepEqual(cleared.entries[0]?.overrides, {})
-  const reordered = setEntries(configured, [{ id: 'a', provider: 'p', model: 'a' }], [])
-  assert.deepEqual(reordered.entries[0]?.overrides, { contextWindow: 1000 })
+test('a row keeps the configuration it was given, replacing it whole', () => {
+  const config = { inputModalities: ['text'], contextWindow: 1000 } as const
+  const added = setEntries(state(), [{ id: 'a', provider: 'p', model: 'a', config }], [])
+  assert.deepEqual(added.entries[0]?.config, config)
+  // The page sends the complete configuration, so a new value replaces the old
+  // one outright — there is no delta to merge and nothing to "follow".
+  const replaced = setEntries(added, [{
+    id: 'a',
+    provider: 'p',
+    model: 'a',
+    config: { inputModalities: ['text', 'image'], contextWindow: 2000 },
+  }], [])
+  assert.deepEqual(replaced.entries[0]?.config, { inputModalities: ['text', 'image'], contextWindow: 2000 })
 })
 
-test('an omitted snapshot on an unrelated row keeps the one it already carries', () => {
-  const snapshot = { inputModalities: ['text', 'image'], contextWindow: 262_000 } as const
-  const added = setEntries(state(), [{ id: 'a', provider: 'p', model: 'a', snapshot }], [])
-  assert.deepEqual(added.entries[0]?.snapshot, snapshot)
+test('an omitted configuration on an unrelated row keeps the one it already carries', () => {
+  const config = { inputModalities: ['text', 'image'], contextWindow: 262_000 } as const
+  const added = setEntries(state(), [{ id: 'a', provider: 'p', model: 'a', config }], [])
+  assert.deepEqual(added.entries[0]?.config, config)
   const reordered = setEntries(added, [{ id: 'a', provider: 'p', model: 'a' }], [])
-  assert.deepEqual(reordered.entries[0]?.snapshot, snapshot)
+  assert.deepEqual(reordered.entries[0]?.config, config)
 })

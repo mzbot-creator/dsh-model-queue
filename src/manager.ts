@@ -26,13 +26,12 @@ import type {
   CatalogModel,
   CatalogView,
   ModelConfig,
-  ModelConfigOverrides,
   ModelModality,
   QueueEntryView,
   QueueView,
 } from './contract.ts'
 import { PROVIDER_ID, QUEUE_MODEL_ID, ROUTE_REASONING_EFFORTS } from './contract.ts'
-import { UNKNOWN_CONFIG, aggregateRouteConfig, applyOverrides, configFromListing, configFromResolved, isKnownConfig } from './model-config.ts'
+import { UNKNOWN_CONFIG, aggregateRouteConfig, configFromListing, configFromResolved, isKnownConfig } from './model-config.ts'
 
 /** What the queue route advertises to the loop, derived from the current members. */
 export interface RouteFacts {
@@ -54,10 +53,10 @@ const FALLBACK_CONTEXT_WINDOW = 128_000
  * accept — and a background refresh that only runs while the page is open is
  * worse than none, since it makes the route's claims depend on who is looking.
  *
- * A value therefore stays valid for the life of the process. There is no expiry
- * to outlive: forgetting a member between two requests would make the route
- * withdraw capability claims (images first), and the harness gates `read_image`
- * on exactly those claims.
+ * The answer is copied into the row itself and stands until the user syncs. The
+ * queue holds no separate cache: the document is the memory, so a restart, a
+ * page load and a request all see the same value, and there is no second copy
+ * that could disagree with it.
  */
 interface ResolvedFacts {
   /** The resolved facts, or `undefined` when the route never answered. */
@@ -68,8 +67,8 @@ interface ResolvedFacts {
 
 /** The mutable queue service the rest of the plugin talks to. */
 export class QueueManager {
-  /** Last resolved configuration per `provider\u0000model`. */
-  private readonly facts = new Map<string, ResolvedFacts>()
+  /** Why the last resolution of `provider\u0000model` failed, for catalog diagnostics. */
+  private readonly resolveErrors = new Map<string, string>()
 
   /** Serializes every mutation so read-modify-write cannot lose an update. */
   private chain: Promise<unknown> = Promise.resolve()
@@ -204,10 +203,10 @@ export class QueueManager {
   /**
    * Replace the queue with an ordered list from the UI.
    *
-   * A row that arrives without a snapshot is resolved against its route first,
-   * so the queue never stores a row it knows nothing about while the route is
-   * answering. A reorder (an id that still names the same model) keeps the
-   * stored snapshot and overrides, so moving a row never silently resets it.
+   * A row that arrives without a configuration is resolved against its route
+   * first, so the queue never stores a row it knows nothing about while the route
+   * is answering. A reorder (an id that still names the same model) keeps the
+   * stored configuration, so moving a row never silently resets it.
    * @param entries - the requested entries.
    * @returns the committed state.
    * @throws {Error} when a row is not a usable provider/model pair.
@@ -223,13 +222,13 @@ export class QueueManager {
     const resolved = await Promise.all(entries.map(async (entry): Promise<EntryRequest> => {
       const existing = entry.id === undefined ? undefined : byId.get(entry.id)
       if (existing !== undefined && existing.provider === entry.provider && existing.model === entry.model) {
-        // A reorder carries no snapshot; the stored one stays authoritative, and
-        // a resolve here would only cost a round trip.
+        // A reorder carries no configuration; the stored one stays authoritative,
+        // and a resolve here would only cost a round trip.
         return entry
       }
-      if (entry.snapshot !== undefined) return entry
+      if (entry.config !== undefined) return entry
       const config = await this.resolveConfig(entry.provider, entry.model)
-      return { ...entry, snapshot: config ?? UNKNOWN_CONFIG }
+      return { ...entry, config: config ?? UNKNOWN_CONFIG }
     }))
     const ids = entries.map(() => randomUUID())
     return this.enqueue(state => setEntries(state, resolved, ids))
@@ -259,9 +258,10 @@ export class QueueManager {
    *
    * This is the only path that refreshes capabilities after a row exists: the
    * plugin never polls dsh on its own, so a model reconfigured in dsh's own
-   * settings is picked up when the user says so. Overrides are left alone — they
-   * are the user's explicit intent, not a cache.
-   * @returns whether any row's snapshot changed.
+   * settings is picked up when the user says so. The new value replaces the
+   * row's configuration whole — the row is a copy of dsh's declaration, not a
+   * delta from it, so there is nothing of the user's to preserve on top.
+   * @returns whether any row's configuration changed.
    */
   async syncConfigs(): Promise<boolean> {
     const state = this.state()
@@ -270,51 +270,51 @@ export class QueueManager {
       const config = await this.resolveConfig(entry.provider, entry.model)
       if (config !== undefined) updates.set(entry.id, config)
     }))
-    return this.persistSnapshots(updates)
+    return this.persistConfigs(updates)
   }
 
   /**
    * Read the rows that carry no configuration at all.
    *
    * A row added through the page is resolved on the way in, but a row that
-   * predates the `snapshot` field (a document migrated from version 1) loaded as
-   * an empty configuration. That is not a stale value to refresh on a clock — it
-   * is a row nothing has ever been read for, and leaving it empty would make the
-   * route advertise text-only until the user notices and presses sync. One read
-   * per unread row, at boot, is the whole of it.
+   * predates the configuration field (a document migrated from version 1) loaded
+   * as an empty configuration. That is not a stale value to refresh on a clock —
+   * it is a row nothing has ever been read for, and leaving it empty would make
+   * the route advertise text-only until the user notices and presses sync. One
+   * read per unread row, at boot, is the whole of it.
    * @returns when every unread row has been attempted.
    */
   async readUnresolvedRows(): Promise<void> {
-    const unread = this.state().entries.filter(entry => !isKnownConfig(entry.snapshot))
+    const unread = this.state().entries.filter(entry => !isKnownConfig(entry.config))
     if (unread.length === 0) return
     const updates = new Map<string, ModelConfig>()
     await Promise.all(unread.map(async (entry) => {
       const config = await this.resolveConfig(entry.provider, entry.model)
       if (config !== undefined) updates.set(entry.id, config)
     }))
-    await this.persistSnapshots(updates)
+    await this.persistConfigs(updates)
   }
 
   /**
-   * Write resolved configurations into their rows' snapshots.
+   * Write resolved configurations into their rows.
    *
-   * The snapshot is the route's memory across a restart: with it, a boot that
-   * cannot reach a provider still advertises what dsh last declared, instead of
-   * withdrawing capabilities (images first) until someone opens the plugin page.
-   * Only rows whose configuration actually differs are written, so a routine
-   * refresh costs no disk traffic.
+   * The stored configuration is the route's memory across a restart: with it, a
+   * boot that cannot reach a provider still advertises what dsh last declared,
+   * instead of withdrawing capabilities (images first) until someone opens the
+   * plugin page. Only rows whose configuration actually differs are written, so
+   * a routine refresh costs no disk traffic.
    * @param updates - resolved configurations keyed by entry id.
    * @returns whether the document changed.
    */
-  private async persistSnapshots(updates: ReadonlyMap<string, ModelConfig>): Promise<boolean> {
+  private async persistConfigs(updates: ReadonlyMap<string, ModelConfig>): Promise<boolean> {
     if (updates.size === 0) return false
     let changed = false
     await this.enqueue((current) => {
       const entries = current.entries.map((entry) => {
         const config = updates.get(entry.id)
-        if (config === undefined || sameConfig(entry.snapshot, config)) return entry
+        if (config === undefined || sameConfig(entry.config, config)) return entry
         changed = true
-        return { ...entry, snapshot: config }
+        return { ...entry, config }
       })
       return changed ? { ...current, revision: current.revision + 1, entries } : current
     })
@@ -331,10 +331,6 @@ export class QueueManager {
     const now = this.clock()
     const selection = selectEntry(state, now)
     const entries: QueueEntryView[] = state.entries.map((entry) => {
-      const resolved = this.memberFacts(entry.provider, entry.model)
-      // `resolved` means "dsh answered for this row in this process", which is
-      // what the page labels as current. It is never taken back on a timer, so a
-      // row is not described as unknown because a poll was slow.
       return {
         id: entry.id,
         provider: entry.provider,
@@ -344,10 +340,7 @@ export class QueueManager {
         remainingMs: Math.max(0, entry.cooldownUntil - now),
         failures: entry.failures,
         ...entry.lastFailure === undefined ? {} : { lastFailure: entry.lastFailure },
-        ...resolved === undefined ? {} : { resolved },
-        snapshot: entry.snapshot,
-        overrides: entry.overrides,
-        effective: applyOverrides(resolved ?? entry.snapshot, entry.overrides),
+        config: entry.config,
       }
     })
     return {
@@ -402,7 +395,7 @@ export class QueueManager {
           resolved: config !== undefined,
           ...config !== undefined
             ? {}
-            : { resolveError: this.facts.get(`${provider.id}\u0000${model.id}`)?.error ?? 'the route did not answer' },
+            : { resolveError: this.resolveErrors.get(`${provider.id}\u0000${model.id}`) ?? 'the route did not answer' },
         })
       }
     }
@@ -410,28 +403,12 @@ export class QueueManager {
   }
 
   /**
-   * The last configuration dsh reported for one member.
-   *
-   * This is what the route advertises and what a dispatch plans against. Only a
-   * user action (adding the row, or asking the page to sync) changes it, so the
-   * route's claims do not depend on cache age: the harness refuses `read_image`
-   * unless the route *declares* image input, and a queue that forgot its members
-   * between two polls would fail that tool for reasons the user cannot see.
-   * @param provider - member provider route.
-   * @param model - member model id.
-   * @returns the last known facts, or `undefined` when the route never answered.
-   */
-  private memberFacts(provider: string, model: string): ModelConfig | undefined {
-    return this.facts.get(`${provider}\u0000${model}`)?.value
-  }
-
-  /**
    * Read one member's complete configuration from dsh.
    *
    * Called when a row is added and when the user asks to sync — never on a timer.
-   * The previous value survives a failed read: only a successful resolution
-   * replaces what dsh said, so a route that cannot answer keeps its last known
-   * facts and records the error rather than degrading the queue route.
+   * This is a one-shot read: the answer is returned to the caller, which stores
+   * it in the row. Nothing is cached here, because the row *is* the cache, and a
+   * second copy could disagree with what the page shows.
    * @param provider - member provider route.
    * @param model - member model id.
    * @returns the resolved facts, or `undefined` when this resolution failed.
@@ -440,56 +417,51 @@ export class QueueManager {
     const key = `${provider}\u0000${model}`
     try {
       const info = await this.llm.resolveModelInfo(provider, model)
-      const value = configFromResolved(info)
-      this.facts.set(key, { value })
-      return value
+      this.resolveErrors.delete(key)
+      return configFromResolved(info)
     } catch (error: unknown) {
-      this.facts.set(key, {
-        value: this.facts.get(key)?.value,
-        error: error instanceof Error ? error.message : String(error),
-      })
+      this.resolveErrors.set(key, error instanceof Error ? error.message : String(error))
       return undefined
     }
   }
 
   /**
-   * The effective configuration of one member: its overrides over its facts.
+   * The configuration one member is dispatched with.
    * @param entry - the member.
-   * @returns the configuration a dispatch through this member uses.
+   * @returns its stored configuration.
    */
   effectiveConfig(entry: QueueEntry): ModelConfig {
-    return applyOverrides(this.memberFacts(entry.provider, entry.model) ?? entry.snapshot, entry.overrides)
+    return entry.config
   }
 
   /**
    * Whether a member accepts one reasoning effort.
    * @param entry - the member.
    * @param effort - the row-level level the adapter is about to forward.
-   * @returns `true` when the member's effective configuration offers it.
+   * @returns `true` when the member's configuration offers it.
    */
   supportsEffort(entry: QueueEntry, effort: string): boolean {
-    return this.effectiveConfig(entry).reasoning?.efforts.some(level => level.id === effort) ?? false
+    return entry.config.reasoning?.efforts.some(level => level.id === effort) ?? false
   }
 
   /**
-   * Read one member's overrides.
+   * The reasoning level a member runs on when the caller names none it accepts.
    * @param entry - the member.
-   * @returns the overrides.
+   * @returns the level id, or `undefined` when the member pins none.
    */
-  overridesOf(entry: QueueEntry): ModelConfigOverrides {
-    return entry.overrides
+  defaultEffortOf(entry: QueueEntry): string | undefined {
+    return entry.config.reasoning?.defaultEffort
   }
 
   /**
-   * Aggregate the members' effective configurations into the facts the queue
-   * route advertises.
+   * Aggregate the members' configurations into the facts the queue route
+   * advertises.
    *
    * The aggregation itself lives in `model-config`, where it is a pure function
    * of the members' configurations and can be tested without a registry; this
-   * method only supplies the per-member inputs. The effective configuration
-   * already falls back to the snapshot a row captured, so a cold resolve cache
-   * (a fresh boot, a page load before any request) still aggregates what dsh
-   * last said instead of advertising nothing at all.
+   * method only supplies the per-member inputs. Each member's configuration is
+   * stored, so a boot, a page load before any request and a cold provider all
+   * aggregate what dsh last said instead of advertising nothing at all.
    *
    * Reasoning levels are the one exception: the adapter strips the level a call
    * names, so the route advertises the harness's whole vocabulary rather than

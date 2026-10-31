@@ -14,19 +14,29 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { DEFAULT_COOLDOWN_MS, EMPTY_QUEUE, MAX_COOLDOWN_MS } from './queue.ts'
 import type { QueueEntry, QueueFailure, QueueState } from './queue.ts'
-import type { ModelConfigOverrides } from './contract.ts'
-import { UNKNOWN_CONFIG, parseOverrides, parseStoredConfig } from './model-config.ts'
+import type { ModelConfig, ModelConfigOverrides } from './contract.ts'
+import { UNKNOWN_CONFIG, applyOverrides, parseOverrides, parseStoredConfig } from './model-config.ts'
 
 /**
  * On-disk document version.
  *
- * Version 2 added each entry's `snapshot` and `overrides`; a version 1 document
- * is migrated on read (its rows simply have no recorded configuration), so an
- * existing queue survives the upgrade instead of being quarantined.
+ * Version 2 gave each entry a `snapshot` (what dsh reported) plus a sparse
+ * `overrides` delta, and the effective configuration was the delta layered over
+ * the snapshot. That layering made "not overridden" a state the page had to
+ * show — the "follow dsh" option — which is a concept the queue does not want:
+ * a member either accepts images or it does not.
+ *
+ * Version 3 therefore stores one complete configuration per entry. A version 2
+ * document is migrated on read by applying its overrides to its snapshot, so an
+ * existing queue survives the upgrade instead of being quarantined; a version 1
+ * document (no configuration at all) loads as unread rows, as before.
  */
-const FORMAT_VERSION = 2
+const FORMAT_VERSION = 3
 
-/** The version whose document this build can still read. */
+/** A version 2 document: one complete configuration per row, stored sparsely. */
+const OVERRIDES_FORMAT_VERSION = 2
+
+/** The oldest version whose document this build can still read. */
 const LEGACY_FORMAT_VERSION = 1
 
 /** Maximum accepted entries, so a hostile or buggy client cannot grow the file without bound. */
@@ -83,10 +93,11 @@ function optionalFailure(value: unknown): QueueFailure | undefined {
 /**
  * Validate one stored queue entry.
  * @param value - candidate value.
+ * @param version - the document version the entry came from.
  * @returns the entry.
  * @throws {Error} when the entry is malformed.
  */
-export function parseEntry(value: unknown): QueueEntry {
+export function parseEntry(value: unknown, version: number = FORMAT_VERSION): QueueEntry {
   if (typeof value !== 'object' || value === null) throw new Error('each entry must be an object')
   const record = value as Record<string, unknown>
   const cooldownUntil = record.cooldownUntil ?? 0
@@ -103,8 +114,7 @@ export function parseEntry(value: unknown): QueueEntry {
     provider: requiredString(record.provider, 'entry.provider'),
     model: requiredString(record.model, 'entry.model'),
     label: requiredString(record.label, 'entry.label', MAX_LABEL),
-    snapshot: parseStoredConfig(record.snapshot) ?? UNKNOWN_CONFIG,
-    overrides: parseStoredOverrides(record.overrides),
+    config: readEntryConfig(record, version),
     cooldownUntil,
     ...lastFailure === undefined ? {} : { lastFailure },
     failures,
@@ -112,8 +122,25 @@ export function parseEntry(value: unknown): QueueEntry {
 }
 
 /**
+ * Read one entry's configuration, migrating a version 2 row on the way.
+ *
+ * A version 3 row carries the complete value directly. A version 2 row carries
+ * a snapshot plus a sparse overrides delta, so the two are folded together here
+ * — once, at load — instead of being layered on every read; that folding is
+ * exactly what makes "not overridden" stop being a state the page can show.
+ * @param record - the stored entry.
+ * @param version - the document version the entry came from.
+ * @returns the configuration to store.
+ */
+function readEntryConfig(record: Record<string, unknown>, version: number): ModelConfig {
+  if (version !== OVERRIDES_FORMAT_VERSION) return parseStoredConfig(record.config) ?? UNKNOWN_CONFIG
+  const snapshot = parseStoredConfig(record.snapshot) ?? UNKNOWN_CONFIG
+  return applyOverrides(snapshot, parseStoredOverrides(record.overrides))
+}
+
+/**
  * Read a stored override record, rejecting values the routes would also reject.
- * @param value - candidate value from the document.
+ * @param value - candidate value from a version 2 document.
  * @returns the accepted overrides; empty when absent or unusable.
  */
 function parseStoredOverrides(value: unknown): ModelConfigOverrides {
@@ -121,7 +148,7 @@ function parseStoredOverrides(value: unknown): ModelConfigOverrides {
     return parseOverrides(value)
   } catch {
     // A hand-edited document must not take the whole queue down; the row falls
-    // back to following its route, which is the safe default.
+    // back to whatever its snapshot says, which is the safe default.
     return {}
   }
 }
@@ -135,8 +162,9 @@ function parseStoredOverrides(value: unknown): ModelConfigOverrides {
 export function parseDocument(value: unknown): QueueState {
   if (typeof value !== 'object' || value === null) throw new Error('the queue document must be an object')
   const record = value as Record<string, unknown>
-  if (record.version !== FORMAT_VERSION && record.version !== LEGACY_FORMAT_VERSION) {
-    throw new Error(`unsupported queue document version ${String(record.version)}; expected ${FORMAT_VERSION}`)
+  const version = record.version
+  if (version !== FORMAT_VERSION && version !== OVERRIDES_FORMAT_VERSION && version !== LEGACY_FORMAT_VERSION) {
+    throw new Error(`unsupported queue document version ${String(version)}; expected ${FORMAT_VERSION}`)
   }
   const revision = record.revision ?? 0
   if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) {
@@ -148,7 +176,7 @@ export function parseDocument(value: unknown): QueueState {
   }
   if (!Array.isArray(record.entries)) throw new Error('entries must be an array')
   if (record.entries.length > MAX_ENTRIES) throw new Error(`entries may hold at most ${MAX_ENTRIES} models`)
-  const entries = record.entries.map(parseEntry)
+  const entries = record.entries.map(entry => parseEntry(entry, version))
   const ids = new Set(entries.map(entry => entry.id))
   if (ids.size !== entries.length) throw new Error('entry ids must be unique')
   return { revision, cooldownMs: Math.min(cooldownMs, MAX_COOLDOWN_MS), entries }

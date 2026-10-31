@@ -89,7 +89,14 @@ export interface ModelConfig {
   readonly reasoning?: ModelReasoning
 }
 
-/** A queue row's explicit departures from what the harness reports. */
+/**
+ * A sparse configuration delta, used only to read a version 2 document.
+ *
+ * Version 3 stores one complete {@link ModelConfig} per row instead: a member's
+ * configuration is copied from dsh once and then stands, so nothing is layered
+ * at read time any more. This type survives solely so an existing queue can be
+ * migrated instead of quarantined.
+ */
 export interface ModelConfigOverrides {
   /** Replace the model's own modality list (for example to stop sending images to it). */
   readonly inputModalities?: readonly ModelModality[]
@@ -117,14 +124,14 @@ export interface QueueEntryView {
     readonly message: string
     readonly at: number
   }
-  /** What the harness currently reports for this model; absent when the route cannot be resolved. */
-  readonly resolved?: ModelConfig
-  /** What the harness reported when the row was added, shown when the route is currently offline. */
-  readonly snapshot?: ModelConfig
-  /** The row's explicit overrides. */
-  readonly overrides: ModelConfigOverrides
-  /** The configuration the queue actually uses: overrides applied over the resolved facts. */
-  readonly effective: ModelConfig
+  /**
+   * The configuration this member is dispatched with.
+   *
+   * One complete value, copied from dsh when the row was added and replaced
+   * wholesale when the user edits it or syncs. There is no layering and no
+   * "follow dsh" state: image support is either on or off.
+   */
+  readonly config: ModelConfig
 }
 
 /** The whole observable queue, plus whether a request would succeed right now. */
@@ -177,13 +184,14 @@ export interface CatalogView {
   readonly failures: readonly { readonly provider: string, readonly message: string }[]
 }
 
-/** One row of the entries mutation, with its configuration overrides. */
+/** One row of the entries mutation, with the configuration to store for it. */
 export interface EntryRequestView {
   readonly id?: string
   readonly provider: string
   readonly model: string
   readonly label?: string
-  readonly overrides?: ModelConfigOverrides
+  /** The complete configuration to store for this row; omitted on a reorder keeps the stored one. */
+  readonly config?: ModelConfig
 }
 
 /** Body of the entries mutation. */

@@ -1,6 +1,6 @@
 {
   "name": "dsh-model-queue",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Ordered model failover queue for DeepSeek Harness: try the head model first, rotate failures to the tail with a cooldown, and share one queue across sessions and browsers.",
   "type": "module",
   "license": "MIT",

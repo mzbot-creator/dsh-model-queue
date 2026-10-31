@@ -24,15 +24,14 @@ function imageConfig(): ModelConfig {
   }
 }
 
-/** One queued row, snapshot included. */
-function entry(id: string, snapshot: ModelConfig = UNKNOWN_CONFIG): QueueEntry {
+/** One queued row, configuration included. */
+function entry(id: string, config: ModelConfig = UNKNOWN_CONFIG): QueueEntry {
   return {
     id,
     provider: 'od',
     model: id,
     label: id,
-    snapshot,
-    overrides: {},
+    config,
     cooldownUntil: 0,
     failures: 0,
   }
@@ -86,14 +85,14 @@ async function manager(entries: QueueEntry[], answer: () => ModelConfig, clock =
   return { manager: built, store, reads, clock }
 }
 
-test('a resolved configuration never expires', async () => {
-  const { manager: queue, clock } = await manager([entry('a')], imageConfig)
-  await queue.resolveConfig('od', 'a')
+test('a stored configuration never expires', async () => {
+  const { manager: queue, clock, reads } = await manager([entry('a', imageConfig())], imageConfig)
   assert.deepEqual(queue.routeFacts().inputModalities, ['text', 'image'])
 
   clock.t += 24 * 60 * 60 * 1000 // a day later
   assert.deepEqual(queue.routeFacts().inputModalities, ['text', 'image'],
-    'dsh is not re-read on a clock, so the answer stands')
+    'the row is the memory; nothing is re-read on a clock and nothing lapses')
+  assert.equal(reads.n, 0)
 })
 
 test('nothing reads dsh after boot without a user action', async () => {
@@ -107,24 +106,25 @@ test('nothing reads dsh after boot without a user action', async () => {
     'with nothing read yet, the route stays conservative')
 })
 
-test('the stored snapshot answers before anything is read', async () => {
+test('the stored configuration answers before anything is read', async () => {
   const { manager: queue } = await manager([entry('a', imageConfig())], imageConfig)
   assert.deepEqual(queue.routeFacts().inputModalities, ['text', 'image'],
     'the document is the route\'s memory across a restart')
 })
 
-test('a failed re-read keeps the last known capabilities', async () => {
+test('a failed re-read keeps the stored configuration', async () => {
   let answering = true
   const answer = (): ModelConfig => {
     if (!answering) throw new Error('provider temporarily unavailable')
     return imageConfig()
   }
-  const { manager: queue } = await manager([entry('a')], answer)
-  await queue.resolveConfig('od', 'a')
+  const { manager: queue, store, reads } = await manager([entry('a', imageConfig())], answer)
 
   answering = false
   await queue.syncConfigs() // the user asked to sync, and the provider is down
 
+  assert.equal(reads.n, 1, 'the sync did try to read')
+  assert.equal(store.commits(), 0, 'and it wrote nothing, because it read nothing')
   assert.deepEqual(queue.routeFacts().inputModalities, ['text', 'image'],
     'a dead provider must not demote a member the queue already knows')
 })
@@ -133,7 +133,7 @@ test('syncing records the resolved configuration in the document', async () => {
   const { manager: queue, store } = await manager([entry('a')], imageConfig)
   await queue.syncConfigs()
 
-  assert.deepEqual(store.current().entries[0]?.snapshot, imageConfig())
+  assert.deepEqual(store.current().entries[0]?.config, imageConfig())
   assert.equal(store.commits(), 1)
 })
 
@@ -142,7 +142,7 @@ test('a second sync with unchanged facts writes nothing', async () => {
   await queue.syncConfigs()
   await queue.syncConfigs()
 
-  assert.equal(store.commits(), 1, 'an unchanged snapshot must not rewrite the document')
+  assert.equal(store.commits(), 1, 'an unchanged configuration must not rewrite the document')
 })
 
 test('a row with no facts at all stays conservative', async () => {
@@ -155,14 +155,14 @@ test('a row with no facts at all stays conservative', async () => {
 })
 
 test('a row migrated from a version 1 document is read once at boot', async () => {
-  // Version 1 carried no snapshot, so the row loads as UNKNOWN_CONFIG.
+  // A row added before anything was read loads as UNKNOWN_CONFIG.
   const { manager: queue, store, reads } = await manager([entry('a')], imageConfig)
   assert.deepEqual(queue.routeFacts().inputModalities, ['text'], 'nothing read yet')
 
   await queue.readUnresolvedRows()
 
   assert.equal(reads.n, 1, 'the unread row is resolved exactly once')
-  assert.deepEqual(store.current().entries[0]?.snapshot, imageConfig(), 'and the document now remembers it')
+  assert.deepEqual(store.current().entries[0]?.config, imageConfig(), 'and the document now remembers it')
   assert.deepEqual(queue.routeFacts().inputModalities, ['text', 'image'])
 })
 

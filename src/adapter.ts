@@ -358,8 +358,8 @@ export class QueueAdapter extends LlmAdapter {
    * The reasoning level the caller named is **ignored**, by design: the queue
    * route advertises the full harness vocabulary so that no stored selection can
    * ever be refused, and each member then runs on its own level instead of a
-   * level borrowed from whichever model the picker showed. A row's own
-   * `reasoningEffort` override still applies — that one is the member's explicit
+   * level borrowed from whichever model the picker showed. The member's own
+   * configured default level still applies — that is part of its stored
    * configuration, not a value inherited from the call.
    * The output cap is the other control: the queue advertises the smallest
    * member's cap, so a request the route admitted may still exceed this member.
@@ -372,7 +372,7 @@ export class QueueAdapter extends LlmAdapter {
     maxTokens: number | undefined,
   ): { reasoningEffort?: ReasoningEffortId, maxTokens?: number } {
     const controls: { reasoningEffort?: ReasoningEffortId, maxTokens?: number } = {}
-    const pinned = this.manager.overridesOf(entry).reasoningEffort
+    const pinned = this.manager.defaultEffortOf(entry)
     if (pinned !== undefined && this.manager.supportsEffort(entry, pinned)) {
       controls.reasoningEffort = pinned as ReasoningEffortId
     }

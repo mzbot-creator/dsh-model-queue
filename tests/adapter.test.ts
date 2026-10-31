@@ -21,8 +21,7 @@ function entry(id: string, provider = 'p', model = id): QueueEntry {
     provider,
     model,
     label: id,
-    snapshot: { inputModalities: ['text'], contextWindow: 200_000, maxTokens: 8_192 },
-    overrides: {},
+    config: { inputModalities: ['text'], contextWindow: 200_000, maxTokens: 8_192 },
     cooldownUntil: 0,
     failures: 0,
   }
@@ -82,13 +81,9 @@ function fakeManager(
       return state.entries.some(other => other.cooldownUntil === 0) ? 'rotated' : 'exhausted'
     },
     supportsEffort: (_item: QueueEntry, value: string) => effort.supports?.(value) ?? false,
-    /** The fake has no registry to resolve against, so the row's snapshot is the whole truth. */
-    effectiveConfig: (item: QueueEntry) => ({
-      ...item.snapshot,
-      ...item.overrides.contextWindow === undefined ? {} : { contextWindow: item.overrides.contextWindow },
-      ...item.overrides.maxTokens === undefined ? {} : { maxTokens: item.overrides.maxTokens },
-    }),
-    overridesOf: (item: QueueEntry) => item.overrides,
+    /** The row's stored configuration is the whole truth; the fake never reads dsh. */
+    effectiveConfig: (item: QueueEntry) => item.config,
+    defaultEffortOf: (item: QueueEntry) => item.config.reasoning?.defaultEffort,
     routeFacts: () => ({ inputModalities: ['text'], contextWindow: 100_000 }),
     llm: {
       stream: (options: GenerateOptions): AsyncIterable<StreamChunk> => {
@@ -261,9 +256,9 @@ test('a caller-named reasoning level is dropped, not forwarded to the member', a
   assert.deepEqual(seen, [undefined])
 })
 
-test("a row's own reasoning override still reaches the member", async () => {
+test("a member's own configured reasoning level still reaches it", async () => {
   const seen: (string | undefined)[] = []
-  const pinned = { ...entry('a', 'p'), overrides: { reasoningEffort: 'low' } }
+  const pinned = { ...entry('a', 'p'), config: { ...entry('a', 'p').config, reasoning: { efforts: [{ id: 'low', name: 'Low' }], defaultEffort: 'low' } } }
   const fake = fakeManager({
     'p/a': (options) => {
       seen.push(options.reasoningEffort)
@@ -276,9 +271,9 @@ test("a row's own reasoning override still reaches the member", async () => {
   assert.deepEqual(seen, ['low'])
 })
 
-test('a row override the member does not offer is not forwarded', async () => {
+test('a configured level the member does not offer is not forwarded', async () => {
   const seen: (string | undefined)[] = []
-  const pinned = { ...entry('a', 'p'), overrides: { reasoningEffort: 'low' } }
+  const pinned = { ...entry('a', 'p'), config: { ...entry('a', 'p').config, reasoning: { efforts: [{ id: 'low', name: 'Low' }], defaultEffort: 'low' } } }
   const fake = fakeManager({
     'p/a': (options) => {
       seen.push(options.reasoningEffort)

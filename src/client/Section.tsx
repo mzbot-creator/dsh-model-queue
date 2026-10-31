@@ -19,11 +19,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { QUEUE_ROUTE } from '../contract.ts'
+import { isKnownConfig as isKnown } from '../model-config.ts'
 import type {
   CatalogModel,
   CatalogView,
   ModelConfig,
-  ModelConfigOverrides,
   ModelModality,
   QueueEntryView,
   QueueView,
@@ -99,14 +99,6 @@ const styles = {
     borderRadius: 5,
     background: 'transparent',
     border: '1px dashed var(--dsw-alias-border-secondary, rgba(128,128,128,0.35))',
-    whiteSpace: 'nowrap',
-  } as const,
-  capEdited: {
-    fontSize: 11,
-    padding: '1px 7px',
-    borderRadius: 5,
-    background: 'rgba(31,157,99,0.14)',
-    color: '#1f9d63',
     whiteSpace: 'nowrap',
   } as const,
   editor: {
@@ -189,17 +181,17 @@ const TEXT = {
     exhaustedReason: '最后一次失败',
     // Configuration vocabulary.
     capsTitle: '模型配置',
-    capsIntro: '下面每一项都是 dsh 为这个模型解析出的真实配置；“队列路由最终生效”是队列对外公布、实际派发时使用的值。默认完全沿用 dsh 的配置，只有手动修改过的项才会不同（绿色标记）。',
+    capsIntro: '下面每一项都是这一行存下来的配置，加入时从 dsh 的解析结果复制；“队列路由最终生效”是队列对外公布、实际派发时使用的值。',
     routeTitle: '队列路由对外公布的配置',
     legendImage: '读图',
-    legendImageBody: '该模型能不能接收图片。默认沿用 dsh 的解析结果；改成“仅文本”后，队列不会再把图片派发给它，改这个成员时队列路由的读图能力也会跟着收紧。',
+    legendImageBody: '该模型能不能接收图片。加入时按 dsh 的解析结果填入；改成“不支持图片”后，队列不会再把图片派发给它，这个成员也会让队列路由的读图能力跟着收紧。',
     legendContext: '上下文窗口',
-    legendContextBody: '一次请求里输入加输出最多能用多少 token。默认沿用 dsh；调小之后队列会按这个更保守的值对外公布窗口，避免宿主编排出这个成员接不住的请求。',
+    legendContextBody: '一次请求里输入加输出最多能用多少 token。它的值来自 dsh 的声明并存在这一行里；调小之后队列会按这个更保守的值对外公布窗口，避免宿主编排出这个成员接不住的请求。',
     legendOutput: '单次输出上限',
-    legendOutputBody: '一次回复最多能生成多少 token。默认沿用 dsh；调小之后，派发给这个成员的请求如果要求更大的输出，会被自动下调到这个值。',
+    legendOutputBody: '一次回复最多能生成多少 token。它的值来自 dsh 的声明并存在这一行里；调小之后，派发给这个成员的请求如果要求更大的输出，会被自动下调到这个值。',
     legendReasoning: '推理等级',
-    legendReasoningBody: '该模型自己的推理档位（例如 Low / Medium / High）。默认沿用 dsh 的默认档；选定一档后，队列派发到这个成员时就用它。会话/选择器传来的档位一律被丢弃，不会下发到成员。',
-    legendFollow: '前三项都默认“沿用 dsh”：dsh 里的模型声明改了，点一次 Re-sync from dsh 即可同步，不必删除重加。只有你手动改过的项不同，并会标绿。',
+    legendReasoningBody: '该模型自己的推理档位（例如 Low / Medium / High）。选定一档后，队列派发到这个成员时就用它。会话/选择器传来的档位一律被丢弃，不会下发到成员。',
+    legendFollow: '每一行存的是一份完整配置，加入时从 dsh 复制。dsh 里的模型声明改了，点一次 Re-sync from dsh 即可把这些值整体刷新，不必删除重加。',
     routeHint: '队列在模型选择器里只出现一个 "Model Queue"。它对外公布的读图能力、上下文窗口和输出上限按所有成员的“共同可用范围”计算：读图要求每个成员都支持，上下文与输出取最小成员的值。推理等级例外：队列不使用档位（派发时直接丢弃），因此固定公布 dsh 的全部档位，选择器里选哪一档都不影响实际行为。',
     capImage: '读图',
     capImageYes: '支持',
@@ -211,37 +203,29 @@ const TEXT = {
     capDefault: '默认',
     capUnknown: '未知（路由未响应）',
     capNotDeclared: '未声明',
-    capEdited: '已改',
     edit: '修改配置',
     collapse: '收起',
     apply: '保存修改',
-    revert: '恢复为 dsh 配置',
     synced: '已从 dsh 同步',
     syncNow: '从 dsh 重新同步',
-    syncHint: '插件平时不自动跟随 dsh。dsh 里改了上下文窗口、输出上限、读图能力或推理等级后，点这里重新读取一次；手动修改过的项不会被覆盖。',
+    syncHint: '插件平时不自动跟随 dsh。dsh 里改了上下文窗口、输出上限、读图能力或推理等级后，点这里把每一行的配置整体重新读一遍；读不到的行保持原样。',
     fieldImage: '读图能力',
-    fieldImageHint: '这个模型能否接收图片。默认完全沿用 dsh：{value}。改掉之后，队列只会在这个成员上按你选的能力发送或拒绝图片。',
+    fieldImageHint: '这个模型能否接收图片。加入时按 dsh 的声明填入，之后以这里的值为准。',
     fieldContext: '上下文窗口（token）',
-    fieldContextHint: '一次请求里输入 + 输出最多能用多少 token。dsh 当前给出 {value}。留空表示沿用 dsh；调小可用于让队列对外公布更保守的上限。',
+    fieldContextHint: '一次请求里输入 + 输出最多能用多少 token。调小可用于让队列对外公布更保守的上限。',
     fieldOutput: '单次输出上限（token）',
-    fieldOutputHint: '一次回复最多生成多少 token。dsh 当前给出 {value}。留空表示沿用 dsh；队列派发到该成员时，超过这个值的 maxTokens 会被下调到该值。',
+    fieldOutputHint: '一次回复最多生成多少 token。队列派发到该成员时，超过这个值的 maxTokens 会被下调到该值。',
     fieldReasoning: '模型推理等级',
-    fieldReasoningHint: '这个模型自己的推理强度。dsh 当前提供 {value}，默认 {default}。留空表示沿用 dsh 的默认值；选定后，队列派发到这个成员时就用这一档——会话里选了什么都会被丢弃。',
+    fieldReasoningHint: '这个模型自己的推理强度，可选 {value}。选定后，队列派发到这个成员时就用这一档——会话里选了什么都会被丢弃。',
     fieldReasoningNone: '该模型没有声明推理等级',
-    inherit: '沿用 dsh 配置',
-    imageInherit: '沿用 dsh（{value}）',
-    imageForceOn: '强制支持图片',
-    imageForceOff: '强制不支持图片',
-    reasoningInherit: '沿用 dsh 默认（{value}）',
-    reasoningInheritNoDefault: '沿用 dsh 默认（未指定档位）',
-    reasoningNone: '不设置',
+    imageOn: '支持图片',
+    imageOff: '不支持图片',
+    reasoningNoDefault: '跟随 dsh 默认档',
     undefinedValue: '未声明',
     modelsCount: '个模型',
     previewTitle: '将加入的模型',
-    previewHint: '加入后默认沿用 dsh 的完整配置：读图 {image}，上下文 {context}，单次输出 {output}，推理等级 {reasoning}。加到队列后可以逐项修改。',
+    previewHint: '加入后会把 dsh 的完整配置复制到这一行：读图 {image}，上下文 {context}，单次输出 {output}，推理等级 {reasoning}。之后可以逐项修改。',
     resolveFailed: '该模型暂时无法从 dsh 解析完整配置：{reason}',
-    resolvedAtAdd: '这里显示的是上次从 dsh 读到并存下的配置，本次启动还没重新读取。点「从 dsh 重新同步」即可刷新。',
-    overridesActive: '已手动修改',
   },
   en: {
     status: 'Status',
@@ -277,17 +261,17 @@ const TEXT = {
     catalogEmpty: 'No models available to add.',
     exhaustedReason: 'Last failure',
     capsTitle: 'Model configuration',
-    capsIntro: 'Every value below is what dsh itself resolved for that model. "Queue route effective" is the value the queue advertises and actually dispatches with. Everything follows dsh by default; only fields you changed differ (marked green).',
+    capsIntro: 'Every value below is the configuration stored on this row, copied from what dsh resolved when the row was added. "Queue route effective" is the value the queue advertises and actually dispatches with.',
     routeTitle: 'What the queue route advertises',
     legendImage: 'Image support',
-    legendImageBody: 'Whether this model can receive images. Follows what dsh resolved by default; set it to text only and the queue stops sending images to this member, which also narrows what the queue route advertises.',
+    legendImageBody: 'Whether this model can receive images. Filled from what dsh resolved when the row was added; set it to text only and the queue stops sending images to this member, which also narrows what the queue route advertises.',
     legendContext: 'Context window',
-    legendContextBody: 'How many tokens one request may use for input plus output. Follows dsh by default; lowering it makes the queue advertise the smaller window, so the harness never plans a request this member cannot serve.',
+    legendContextBody: 'How many tokens one request may use for input plus output. The value comes from the dsh declaration and is stored on the row; lowering it makes the queue advertise the smaller window, so the harness never plans a request this member cannot serve.',
     legendOutput: 'Output cap',
-    legendOutputBody: 'How many tokens one reply may generate. Follows dsh by default; once lowered, a request that asks for more output is reduced to this value when it is dispatched to this member.',
+    legendOutputBody: 'How many tokens one reply may generate. The value comes from the dsh declaration and is stored on the row; once lowered, a request that asks for more output is reduced to this value when it is dispatched to this member.',
     legendReasoning: 'Reasoning level',
-    legendReasoningBody: 'The reasoning efforts this model offers (for example Low / Medium / High). Follows the dsh default by default; once you pick one, it is used whenever the queue dispatches to this member. A level named by the session or the picker is always dropped, never forwarded.',
-    legendFollow: 'The first three follow dsh by default: when a model declaration in dsh changes, one click on Re-sync from dsh brings the queue up to date without re-adding the row. Only the fields you changed differ, and they are marked green.',
+    legendReasoningBody: 'The reasoning efforts this model offers (for example Low / Medium / High). Once you pick one, it is used whenever the queue dispatches to this member. A level named by the session or the picker is always dropped, never forwarded.',
+    legendFollow: 'Each row stores one complete configuration, copied from dsh when the row is added. When a model declaration in dsh changes, one click on Re-sync from dsh refreshes these values without re-adding the row.',
     routeHint: 'The queue appears as one "Model Queue" in the picker. The image support, context window and output cap it advertises are the intersection of its members: images require every member to accept them, context and output use the smallest member. Reasoning is the exception: the route does not use a level (a dispatch drops it), so it always advertises every level dsh knows — whichever one the picker shows has no effect.',
     capImage: 'Images',
     capImageYes: 'yes',
@@ -299,37 +283,29 @@ const TEXT = {
     capDefault: 'default',
     capUnknown: 'unknown (route did not answer)',
     capNotDeclared: 'not declared',
-    capEdited: 'edited',
     edit: 'Edit configuration',
     collapse: 'Collapse',
     apply: 'Save changes',
-    revert: 'Follow dsh again',
     synced: 'Synced from dsh',
     syncNow: 'Re-sync from dsh',
-    syncHint: 'The plugin does not follow dsh on its own. After changing a context window, output cap, image support or reasoning level in dsh, click here to re-read once; fields you changed by hand are kept.',
+    syncHint: 'The plugin does not follow dsh on its own. After changing a context window, output cap, image support or reasoning level in dsh, click here to re-read every row; a row that cannot be read keeps its stored configuration.',
     fieldImage: 'Image support',
-    fieldImageHint: 'Whether this model can receive images. Following dsh means: {value}. Once changed, the queue sends or refuses images on this member the way you chose.',
+    fieldImageHint: 'Whether this model can receive images. Filled from the dsh declaration when the row is added; this value wins afterwards.',
     fieldContext: 'Context window (tokens)',
-    fieldContextHint: 'How many tokens one request may use for input plus output. dsh currently reports {value}. Leave empty to follow dsh; lowering it makes the queue advertise a more conservative window.',
+    fieldContextHint: 'How many tokens one request may use for input plus output. Lowering it makes the queue advertise a more conservative window.',
     fieldOutput: 'Output cap (tokens)',
-    fieldOutputHint: 'How many tokens one reply may generate. dsh currently reports {value}. Leave empty to follow dsh; when a request is dispatched to this member, a larger maxTokens is lowered to this value.',
+    fieldOutputHint: 'How many tokens one reply may generate. When a request is dispatched to this member, a larger maxTokens is lowered to this value.',
     fieldReasoning: 'Reasoning level',
-    fieldReasoningHint: 'The reasoning effort this model offers. dsh currently offers {value}, defaulting to {default}. Leave empty to follow dsh; once chosen, the queue uses it whenever it dispatches to this member — a level named by the session is dropped.',
+    fieldReasoningHint: 'The reasoning effort this model offers, one of {value}. Once chosen, the queue uses it whenever it dispatches to this member — a level named by the session is dropped.',
     fieldReasoningNone: 'This model declares no reasoning levels',
-    inherit: 'Follow dsh',
-    imageInherit: 'Follow dsh ({value})',
-    imageForceOn: 'Force image support',
-    imageForceOff: 'Force text only',
-    reasoningInherit: 'Follow dsh default ({value})',
-    reasoningInheritNoDefault: 'Follow dsh default (no level named)',
-    reasoningNone: 'none',
+    imageOn: 'Images supported',
+    imageOff: 'Text only',
+    reasoningNoDefault: 'Follow the dsh default level',
     undefinedValue: 'not declared',
     modelsCount: 'model(s)',
     previewTitle: 'Model to add',
-    previewHint: 'Once added it follows dsh completely: images {image}, context {context}, output {output}, reasoning {reasoning}. You can change any of these per row afterwards.',
+    previewHint: 'Adding the row copies the full dsh configuration onto it: images {image}, context {context}, output {output}, reasoning {reasoning}. You can change any of these afterwards.',
     resolveFailed: 'dsh could not resolve the full configuration for this model: {reason}',
-    resolvedAtAdd: 'Captured from dsh and stored; this run has not read it again. Use "Re-sync from dsh" to refresh.',
-    overridesActive: 'edited by hand',
   },
 } as const
 
@@ -391,28 +367,27 @@ function reasoningSummary(config: ModelConfig, t: Strings): string {
 /** Format one configuration as the compact badge line shown per row. */
 function CapBadges(props: {
   readonly config: ModelConfig
-  readonly overrides: ModelConfigOverrides
   readonly unknown: boolean
   readonly t: Strings
   /** Replaces the reasoning text; the route advertises a set it never uses. */
   readonly reasoningText?: string
 }) {
-  const { config, overrides, unknown, t, reasoningText } = props
+  const { config, unknown, t, reasoningText } = props
   const unknownText = t.capUnknown
   return (
     <div style={styles.caps}>
-      <span style={overrides.inputModalities === undefined ? styles.cap : styles.capEdited}>
+      <span style={styles.cap}>
         {t.capImage}: {unknown && config.inputModalities.length === 0
           ? unknownText
           : acceptsImages(config) ? t.capImageYes : t.capImageNo}
       </span>
-      <span style={overrides.contextWindow === undefined ? styles.cap : styles.capEdited}>
+      <span style={styles.cap}>
         {t.capContext}: {tokens(config.contextWindow, unknown ? unknownText : t.capNotDeclared)}
       </span>
-      <span style={overrides.maxTokens === undefined ? styles.cap : styles.capEdited}>
+      <span style={styles.cap}>
         {t.capOutput}: {tokens(config.maxTokens, unknown ? unknownText : t.capNotDeclared)}
       </span>
-      <span style={overrides.reasoningEffort === undefined ? styles.cap : styles.capEdited}>
+      <span style={styles.cap}>
         {t.capReasoning}: {unknown && config.reasoning === undefined
           ? unknownText
           : reasoningText ?? reasoningSummary(config, t)}
@@ -540,28 +515,22 @@ export function ModelQueueSection(props: ModelQueueSectionInjected) {
   }, [reload, t])
 
   /**
-   * Send the whole queue back. Overrides travel with the rows that carry them,
-   * so an unrelated reorder never drops a configuration the user set.
+   * Send the whole queue back. Each row travels with its complete configuration,
+   * so an unrelated reorder never drops a value the user set.
    */
   const writeEntries = useCallback(async (
-    entries: readonly { id?: string, provider: string, model: string, label?: string, overrides?: ModelConfigOverrides }[],
+    entries: readonly { id?: string, provider: string, model: string, label?: string, config?: ModelConfig }[],
   ) => {
-    await post('/entries', {
-      entries: entries.map(row => row.overrides === undefined || Object.keys(row.overrides).length === 0
-        ? row
-        : { ...row, overrides: row.overrides }),
-    })
+    await post('/entries', { entries })
   }, [post])
 
-  /** The rows as they are stored, including their overrides, ready to be reordered. */
+  /** The rows as they are stored, each with its configuration, ready to be reordered. */
   const rowsOf = useCallback((entries: readonly QueueEntryView[]) => entries.map(entry => ({
     id: entry.id,
     provider: entry.provider,
     model: entry.model,
     label: entry.label,
-    // Always present, even when empty: `{}` is how this page says "follow dsh
-    // again", while omitting the key would mean "keep whatever is stored".
-    overrides: entry.overrides,
+    config: entry.config,
   })), [])
 
   const move = useCallback(async (index: number, delta: number) => {
@@ -580,9 +549,9 @@ export function ModelQueueSection(props: ModelQueueSectionInjected) {
     await writeEntries(rowsOf(view.entries).filter(row => row.id !== id))
   }, [view, rowsOf, writeEntries])
 
-  const saveOverrides = useCallback(async (id: string, overrides: ModelConfigOverrides) => {
+  const saveConfig = useCallback(async (id: string, config: ModelConfig) => {
     if (view === null) return
-    await writeEntries(rowsOf(view.entries).map(row => row.id === id ? { ...row, overrides } : row))
+    await writeEntries(rowsOf(view.entries).map(row => row.id === id ? { ...row, config } : row))
   }, [view, rowsOf, writeEntries])
 
   const append = useCallback(async () => {
@@ -645,7 +614,6 @@ export function ModelQueueSection(props: ModelQueueSectionInjected) {
             <p style={{ ...styles.fieldHint, margin: '0 0 6px' }}>{t.routeHint}</p>
             <CapBadges
               config={view.route}
-              overrides={{}}
               unknown={view.entries.length === 0}
               reasoningText={t.capReasoningIgnored}
               t={t}
@@ -676,7 +644,7 @@ export function ModelQueueSection(props: ModelQueueSectionInjected) {
                     onUp={() => { void move(index, -1) }}
                     onDown={() => { void move(index, 1) }}
                     onRemove={() => { void remove(entry.id) }}
-                    onSave={overrides => { void saveOverrides(entry.id, overrides) }}
+                    onSave={config => { void saveConfig(entry.id, config) }}
                   />
                 ))}
               </div>
@@ -703,7 +671,7 @@ export function ModelQueueSection(props: ModelQueueSectionInjected) {
         {picked === undefined ? null : (
           <div style={{ marginTop: 10 }}>
             <div style={{ ...styles.label, marginBottom: 4 }}>{t.previewTitle}</div>
-            <CapBadges config={picked.config} overrides={{}} unknown={!picked.resolved} t={t} />
+            <CapBadges config={picked.config} unknown={!picked.resolved} t={t} />
             {picked.resolved ? null : (
               <p style={{ ...styles.fieldHint, marginTop: 6, color: '#b7791f' }}>
                 {t.resolveFailed.replace('{reason}', picked.resolveError ?? t.capUnknown)}
@@ -801,25 +769,19 @@ function Member(props: {
   readonly onUp: () => void
   readonly onDown: () => void
   readonly onRemove: () => void
-  readonly onSave: (overrides: ModelConfigOverrides) => void
+  readonly onSave: (config: ModelConfig) => void
 }) {
   const { entry, index, head, busy, t } = props
   const cooling = entry.remainingMs > 0
   const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState<ModelConfigOverrides>(entry.overrides)
+  const [draft, setDraft] = useState<ModelConfig>(entry.config)
 
   // Opening the editor starts from what is stored, not from a stale draft the
   // last row mutation left behind.
   const open = (): void => {
-    setDraft(entry.overrides)
+    setDraft(entry.config)
     setEditing(true)
   }
-
-  // What dsh last reported for this model; the stored snapshot covers a route
-  // that is not answering, and the effective value is the last resort so the
-  // editor always has a base to describe.
-  const dshFacts: ModelConfig = entry.resolved ?? entry.snapshot ?? entry.effective
-  const edited = Object.keys(entry.overrides).length > 0
 
   return (
     <div style={styles.member}>
@@ -830,7 +792,6 @@ function Member(props: {
             {entry.label}
             {head ? <span style={{ ...styles.badge, marginLeft: 8, color: '#1f9d63' }}>{t.head}</span> : null}
             {cooling ? <span style={{ ...styles.badge, marginLeft: 8, color: '#b7791f' }}>{t.cooldown} {duration(entry.remainingMs, t)}</span> : null}
-            {edited ? <span style={{ ...styles.badge, marginLeft: 8, color: '#1f9d63' }}>{t.overridesActive}</span> : null}
           </div>
           <div style={styles.meta}>
             {entry.provider} · {entry.model}
@@ -852,24 +813,14 @@ function Member(props: {
         />
       </div>
 
-      <CapBadges
-        config={entry.effective}
-        overrides={entry.overrides}
-        unknown={entry.resolved === undefined}
-        t={t}
-      />
-      {entry.resolved === undefined ? (
-        <div style={{ ...styles.fieldHint, marginTop: 4 }}>{t.resolvedAtAdd}</div>
-      ) : null}
+      <CapBadges config={entry.config} unknown={!isKnown(entry.config)} t={t} />
 
       {editing ? (
         <Editor
           t={t}
-          dsh={dshFacts}
           draft={draft}
           busy={busy}
           onChange={setDraft}
-          onRevert={() => { setDraft({}); props.onSave({}) ; setEditing(false) }}
           onApply={() => { props.onSave(draft); setEditing(false) }}
         />
       ) : null}
@@ -880,22 +831,14 @@ function Member(props: {
 /** The per-row configuration editor: four fields, each explaining what it does. */
 function Editor(props: {
   readonly t: Strings
-  readonly dsh: ModelConfig
-  readonly draft: ModelConfigOverrides
+  readonly draft: ModelConfig
   readonly busy: boolean
-  readonly onChange: (next: ModelConfigOverrides) => void
+  readonly onChange: (next: ModelConfig) => void
   readonly onApply: () => void
-  readonly onRevert: () => void
 }) {
-  const { t, dsh, draft, busy, onChange, onApply, onRevert } = props
-  const efforts = dsh.reasoning?.efforts ?? []
-  const imageValue = dsh.inputModalities.length === 0
-    ? t.capUnknown
-    : acceptsImages(dsh) ? t.capImageYes : t.capImageNo
-
-  const imageChoice = draft.inputModalities === undefined
-    ? 'inherit'
-    : draft.inputModalities.includes('image') ? 'on' : 'off'
+  const { t, draft, busy, onChange, onApply } = props
+  const efforts = draft.reasoning?.efforts ?? []
+  const imageChoice = draft.inputModalities.includes('image') ? 'on' : 'off'
 
   return (
     <div style={styles.editor}>
@@ -907,17 +850,15 @@ function Editor(props: {
           disabled={busy}
           onChange={(event) => {
             const value = event.target.value
-            const next: { -readonly [K in keyof ModelConfigOverrides]: ModelConfigOverrides[K] } = { ...draft }
-            if (value === 'inherit') delete next.inputModalities
-            else next.inputModalities = (value === 'on' ? ['text', 'image'] : ['text']) as readonly ModelModality[]
+            const next: { -readonly [K in keyof ModelConfig]: ModelConfig[K] } = { ...draft }
+            next.inputModalities = (value === 'on' ? ['text', 'image'] : ['text']) as readonly ModelModality[]
             onChange(next)
           }}
         >
-          <option value='inherit'>{t.imageInherit.replace('{value}', imageValue)}</option>
-          <option value='on'>{t.imageForceOn}</option>
-          <option value='off'>{t.imageForceOff}</option>
+          <option value='on'>{t.imageOn}</option>
+          <option value='off'>{t.imageOff}</option>
         </select>
-        <span style={styles.fieldHint}>{t.fieldImageHint.replace('{value}', imageValue)}</span>
+        <span style={styles.fieldHint}>{t.fieldImageHint}</span>
       </div>
 
       <div style={styles.field}>
@@ -925,12 +866,12 @@ function Editor(props: {
         <input
           type='number'
           min={1}
-          placeholder={dsh.contextWindow === undefined ? t.undefinedValue : String(dsh.contextWindow)}
+          placeholder={t.undefinedValue}
           style={styles.input}
           value={draft.contextWindow === undefined ? '' : String(draft.contextWindow)}
           disabled={busy}
           onChange={(event) => {
-            const next = { ...draft }
+            const next: { -readonly [K in keyof ModelConfig]: ModelConfig[K] } = { ...draft }
             const raw = event.target.value.trim()
             if (raw === '') delete next.contextWindow
             else {
@@ -941,9 +882,7 @@ function Editor(props: {
             onChange(next)
           }}
         />
-        <span style={styles.fieldHint}>
-          {t.fieldContextHint.replace('{value}', tokens(dsh.contextWindow, t.undefinedValue))}
-        </span>
+        <span style={styles.fieldHint}>{t.fieldContextHint}</span>
       </div>
 
       <div style={styles.field}>
@@ -951,12 +890,12 @@ function Editor(props: {
         <input
           type='number'
           min={1}
-          placeholder={dsh.maxTokens === undefined ? t.undefinedValue : String(dsh.maxTokens)}
+          placeholder={t.undefinedValue}
           style={styles.input}
           value={draft.maxTokens === undefined ? '' : String(draft.maxTokens)}
           disabled={busy}
           onChange={(event) => {
-            const next = { ...draft }
+            const next: { -readonly [K in keyof ModelConfig]: ModelConfig[K] } = { ...draft }
             const raw = event.target.value.trim()
             if (raw === '') delete next.maxTokens
             else {
@@ -967,9 +906,7 @@ function Editor(props: {
             onChange(next)
           }}
         />
-        <span style={styles.fieldHint}>
-          {t.fieldOutputHint.replace('{value}', tokens(dsh.maxTokens, t.undefinedValue))}
-        </span>
+        <span style={styles.fieldHint}>{t.fieldOutputHint}</span>
       </div>
 
       <div style={styles.field}>
@@ -980,20 +917,20 @@ function Editor(props: {
               <>
                 <select
                   style={styles.select}
-                  value={draft.reasoningEffort ?? ''}
+                  value={draft.reasoning?.defaultEffort ?? ''}
                   disabled={busy}
                   onChange={(event) => {
-                    const next = { ...draft }
-                    if (event.target.value === '') delete next.reasoningEffort
-                    else next.reasoningEffort = event.target.value
+                    const next: { -readonly [K in keyof ModelConfig]: ModelConfig[K] } = { ...draft }
+                    if (draft.reasoning !== undefined) {
+                      const reasoning: { -readonly [K in keyof typeof draft.reasoning]: NonNullable<typeof draft.reasoning>[K] } = { ...draft.reasoning }
+                      if (event.target.value === '') delete reasoning.defaultEffort
+                      else reasoning.defaultEffort = event.target.value
+                      next.reasoning = reasoning
+                    }
                     onChange(next)
                   }}
                 >
-                  <option value=''>
-                    {dsh.reasoning?.defaultEffort === undefined
-                      ? t.reasoningInheritNoDefault
-                      : t.reasoningInherit.replace('{value}', effortName(dsh, dsh.reasoning.defaultEffort))}
-                  </option>
+                  <option value=''>{t.reasoningNoDefault}</option>
                   {efforts.map(effort => (
                     <option key={effort.id} value={effort.id}>
                       {effort.name}{effort.description === undefined ? '' : ` — ${effort.description}`}
@@ -1001,11 +938,7 @@ function Editor(props: {
                   ))}
                 </select>
                 <span style={styles.fieldHint}>
-                  {t.fieldReasoningHint
-                    .replace('{value}', efforts.map(effort => effort.name).join(' / '))
-                    .replace('{default}', dsh.reasoning?.defaultEffort === undefined
-                      ? t.reasoningNone
-                      : effortName(dsh, dsh.reasoning.defaultEffort))}
+                  {t.fieldReasoningHint.replace('{value}', efforts.map(effort => effort.name).join(' / '))}
                 </span>
               </>
             )}
@@ -1013,7 +946,6 @@ function Editor(props: {
 
       <div style={styles.row}>
         <Action label={t.apply} disabled={busy} onClick={onApply} />
-        <Action label={t.revert} disabled={busy} onClick={onRevert} />
       </div>
     </div>
   )

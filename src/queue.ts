@@ -9,7 +9,7 @@
  * @module dsh-model-queue/queue
  */
 
-import type { ModelConfig, ModelConfigOverrides } from './contract.ts'
+import type { ModelConfig } from './contract.ts'
 import { UNKNOWN_CONFIG } from './model-config.ts'
 
 /** One model in the queue: a provider route plus a model id on that route. */
@@ -23,13 +23,14 @@ export interface QueueEntry {
   /** Label captured when the entry was added, so the queue still reads well when a route is offline. */
   readonly label: string
   /**
-   * The model's configuration as the harness last reported it, captured when
-   * the row was added or last re-synced. It keeps the page honest while the
-   * route is offline, and it is what the row's overrides are layered on.
+   * The configuration this member is dispatched with.
+   *
+   * One complete value: copied from dsh when the row is added, replaced
+   * wholesale when the user edits it or syncs. Nothing is layered on top at read
+   * time, so what the page shows and what the route advertises cannot drift
+   * apart, and there is no "follow dsh" state to misread.
    */
-  readonly snapshot: ModelConfig
-  /** The row's explicit departures from {@link snapshot}; empty means "follow the route". */
-  readonly overrides: ModelConfigOverrides
+  readonly config: ModelConfig
   /** Epoch milliseconds before which the queue will not select this entry; `0` means ready. */
   readonly cooldownUntil: number
   /** Why the entry last entered cooldown; absent for an entry that never failed. */
@@ -68,10 +69,13 @@ export interface EntryRequest {
   readonly model: string
   /** Optional display label; defaults to `provider/model`. */
   readonly label?: string
-  /** The configuration captured for this row; kept when the caller omits it on a reorder. */
-  readonly snapshot?: ModelConfig
-  /** The row's explicit departures from its snapshot; omitted on a reorder keeps the stored ones. */
-  readonly overrides?: ModelConfigOverrides
+  /**
+   * The complete configuration to store for this row.
+   *
+   * Omitted on a reorder, which keeps whatever the row already carries; present
+   * on an add and on an edit, where the caller's value replaces it wholesale.
+   */
+  readonly config?: ModelConfig
 }
 
 /** Result of asking the queue which entry a request should start from. */
@@ -218,16 +222,14 @@ export function setEntries(
     const sameModel = existing !== undefined
       && existing.provider === wanted.provider
       && existing.model === wanted.model
-    // A reorder sends only ids and order, so an omitted field keeps what the row
-    // already carried. Adding a model sends both, and the caller's values win.
-    const snapshot = sameModel
-      ? wanted.snapshot ?? existing.snapshot
-      : wanted.snapshot ?? UNKNOWN_CONFIG
-    const overrides = sameModel
-      ? wanted.overrides ?? existing.overrides
-      : wanted.overrides ?? {}
+    // A reorder sends only ids and order, so an omitted configuration keeps what
+    // the row already carries. Adding or editing a model sends it, and the
+    // caller's value replaces the stored one whole.
+    const config = sameModel
+      ? wanted.config ?? existing.config
+      : wanted.config ?? UNKNOWN_CONFIG
     if (sameModel) {
-      entries.push({ ...existing, label, snapshot, overrides })
+      entries.push({ ...existing, label, config })
       return
     }
     entries.push({
@@ -235,8 +237,7 @@ export function setEntries(
       provider: wanted.provider,
       model: wanted.model,
       label,
-      snapshot,
-      overrides,
+      config,
       cooldownUntil: existing?.cooldownUntil ?? 0,
       ...existing?.lastFailure === undefined ? {} : { lastFailure: existing.lastFailure },
       failures: existing?.failures ?? 0,
@@ -286,8 +287,7 @@ function sameEntries(left: readonly QueueEntry[], right: readonly QueueEntry[]):
       && entry.provider === other.provider
       && entry.model === other.model
       && entry.label === other.label
-      && sameConfig(entry.snapshot, other.snapshot)
-      && sameOverrides(entry.overrides, other.overrides)
+      && sameConfig(entry.config, other.config)
       && entry.cooldownUntil === other.cooldownUntil
       && entry.failures === other.failures
       && entry.lastFailure?.at === other.lastFailure?.at
@@ -297,13 +297,13 @@ function sameEntries(left: readonly QueueEntry[], right: readonly QueueEntry[]):
 }
 
 /**
- * Compare two snapshots for structural equality.
+ * Compare two configurations for structural equality.
  *
  * Capacities and modalities are compared directly; the reasoning block is
  * compared by its ordered levels and its default, because a member reopening a
  * page must not look like a change.
- * @param left - first snapshot.
- * @param right - second snapshot.
+ * @param left - first configuration.
+ * @param right - second configuration.
  * @returns whether both describe the same configuration.
  */
 export function sameConfig(left: ModelConfig | undefined, right: ModelConfig | undefined): boolean {
@@ -322,22 +322,4 @@ export function sameConfig(left: ModelConfig | undefined, right: ModelConfig | u
     return other !== undefined && effort.id === other.id && effort.name === other.name
       && effort.description === other.description
   })
-}
-
-/**
- * Compare two override records for structural equality.
- * @param left - first record.
- * @param right - second record.
- * @returns whether both name the same departures.
- */
-export function sameOverrides(left: ModelConfigOverrides, right: ModelConfigOverrides): boolean {
-  if (left === right) return true
-  if (left.contextWindow !== right.contextWindow) return false
-  if (left.maxTokens !== right.maxTokens) return false
-  if (left.reasoningEffort !== right.reasoningEffort) return false
-  const leftModalities = left.inputModalities
-  const rightModalities = right.inputModalities
-  if (leftModalities === undefined || rightModalities === undefined) return leftModalities === rightModalities
-  return leftModalities.length === rightModalities.length
-    && leftModalities.every((modality, index) => rightModalities[index] === modality)
 }

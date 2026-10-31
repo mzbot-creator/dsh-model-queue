@@ -28,19 +28,18 @@ function sample(revision = 3): QueueState {
         provider: 'deepseek-official',
         model: 'deepseek-v4-flash',
         label: 'DeepSeek V4 Flash',
-        snapshot: {
+        config: {
           inputModalities: ['text', 'image'],
-          contextWindow: 1_000_000,
+          contextWindow: 500_000,
           maxTokens: 65_536,
           reasoning: {
             efforts: [
               { id: 'low', name: 'Low' },
               { id: 'high', name: 'High' },
             ],
-            defaultEffort: 'low',
+            defaultEffort: 'high',
           },
         },
-        overrides: { contextWindow: 500_000, reasoningEffort: 'high' },
         cooldownUntil: 1_700_000_000_000,
         failures: 2,
         lastFailure: { code: 'QUOTA', message: 'out of credit', at: 1_699_999_000_000 },
@@ -50,8 +49,7 @@ function sample(revision = 3): QueueState {
         provider: 'od3',
         model: 'deepseek-v4.1-flash',
         label: 'OD3 V4.1 Flash',
-        snapshot: { inputModalities: ['text'], contextWindow: 200_000 },
-        overrides: {},
+        config: { inputModalities: ['text'], contextWindow: 200_000 },
         cooldownUntil: 0,
         failures: 0,
       },
@@ -146,4 +144,63 @@ test('a stored failure without a message is refused', () => {
       lastFailure: { code: 'QUOTA', at: 1 },
     }],
   }), /lastFailure.message/)
+})
+
+test('a version 2 document folds its snapshot and overrides into one configuration', () => {
+  // Version 2 stored a snapshot plus a sparse delta the user had changed. The
+  // delta is folded in exactly once, on load; after that the row carries one
+  // complete configuration and there is nothing left to layer.
+  const loaded = parseDocument({
+    version: 2,
+    revision: 7,
+    cooldownMs: 60_000,
+    entries: [
+      {
+        id: 'a',
+        provider: 'od',
+        model: 'flash',
+        label: 'flash',
+        snapshot: { inputModalities: ['text', 'image'], contextWindow: 1_048_000, maxTokens: 128_000 },
+        overrides: { contextWindow: 500_000, reasoningEffort: 'high' },
+        cooldownUntil: 0,
+        failures: 0,
+      },
+    ],
+  })
+  assert.deepEqual(loaded.entries[0]?.config, {
+    inputModalities: ['text', 'image'],
+    contextWindow: 500_000,
+    maxTokens: 128_000,
+  })
+})
+
+test('a version 2 row with no overrides keeps its snapshot as the configuration', () => {
+  const loaded = parseDocument({
+    version: 2,
+    revision: 7,
+    entries: [
+      {
+        id: 'a',
+        provider: 'od',
+        model: 'flash',
+        label: 'flash',
+        snapshot: { inputModalities: ['text', 'image'], contextWindow: 1_048_000 },
+        overrides: {},
+        cooldownUntil: 0,
+        failures: 0,
+      },
+    ],
+  })
+  assert.deepEqual(loaded.entries[0]?.config, { inputModalities: ['text', 'image'], contextWindow: 1_048_000 })
+})
+
+test('a configuration is written back as version 3', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mq-store-'))
+  const path = join(dir, 'queue.json')
+  const store = new QueueStore(path, recorder())
+  await store.load()
+  await store.commit(sample())
+  const written = JSON.parse(await readFile(path, 'utf8')) as { version: number, entries: { config?: unknown }[] }
+  assert.equal(written.version, 3)
+  assert.ok(written.entries[0]?.config !== undefined, 'the row stores its configuration directly')
 })

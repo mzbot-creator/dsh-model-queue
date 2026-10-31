@@ -206,6 +206,19 @@ export function parseOverrides(value: unknown): ModelConfigOverrides {
 }
 
 /**
+ * Whether a stored configuration says anything at all.
+ *
+ * A row migrated from a version 1 document carries {@link UNKNOWN_CONFIG}: no
+ * modalities and no capacities. That means "never read", which is not the same as
+ * a model that genuinely accepts only text, and the two must not be conflated.
+ * @param config - a stored configuration.
+ * @returns whether any capability is recorded.
+ */
+export function isKnownConfig(config: ModelConfig): boolean {
+  return config.inputModalities.length > 0 || config.contextWindow !== undefined
+}
+
+/**
  * Whether a row carries any departure at all.
  * @param overrides - the row's overrides.
  * @returns whether at least one field is set.

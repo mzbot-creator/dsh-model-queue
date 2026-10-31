@@ -17,7 +17,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
-import { selectEntry, rotateFailed, markSucceeded, setEntries, setCooldown, clearCooldowns } from './queue.ts'
+import { selectEntry, rotateFailed, markSucceeded, setEntries, setCooldown, clearCooldowns, sameConfig } from './queue.ts'
 import type { EntryRequest, QueueEntry, QueueState, Selection } from './queue.ts'
 import { classifyFailure } from './classify.ts'
 import { normalizeCooldown } from './store.ts'
@@ -32,7 +32,7 @@ import type {
   QueueView,
 } from './contract.ts'
 import { PROVIDER_ID, QUEUE_MODEL_ID, ROUTE_REASONING_EFFORTS } from './contract.ts'
-import { UNKNOWN_CONFIG, aggregateRouteConfig, applyOverrides, configFromListing, configFromResolved } from './model-config.ts'
+import { UNKNOWN_CONFIG, aggregateRouteConfig, applyOverrides, configFromListing, configFromResolved, isKnownConfig } from './model-config.ts'
 
 /** What the queue route advertises to the loop, derived from the current members. */
 export interface RouteFacts {
@@ -45,22 +45,31 @@ export interface RouteFacts {
 /** Fallback context window when no member could be resolved; conservative on purpose. */
 const FALLBACK_CONTEXT_WINDOW = 128_000
 
-/** How long a resolved-model result stays usable before it is resolved again. */
-const MODEL_FACTS_TTL_MS = 30_000
-
-/** One cached member resolution. */
-interface CachedFacts {
-  readonly expiresAt: number
-  /** The resolved facts, or `undefined` when the route refused to resolve the model. */
+/**
+ * One member resolution.
+ *
+ * A member's configuration is read from dsh at exactly two moments: when the row
+ * is added, and when the user asks the page to sync. Nothing re-reads it on a
+ * clock, because a model that has been configured does not change what it can
+ * accept — and a background refresh that only runs while the page is open is
+ * worse than none, since it makes the route's claims depend on who is looking.
+ *
+ * A value therefore stays valid for the life of the process. There is no expiry
+ * to outlive: forgetting a member between two requests would make the route
+ * withdraw capability claims (images first), and the harness gates `read_image`
+ * on exactly those claims.
+ */
+interface ResolvedFacts {
+  /** The resolved facts, or `undefined` when the route never answered. */
   readonly value: ModelConfig | undefined
-  /** Why the resolution failed, for the catalog's diagnostics. */
+  /** Why the last resolution failed, for the catalog's diagnostics. */
   readonly error?: string
 }
 
 /** The mutable queue service the rest of the plugin talks to. */
 export class QueueManager {
-  /** Cached capability facts per `provider\u0000model`. */
-  private readonly facts = new Map<string, CachedFacts>()
+  /** Last resolved configuration per `provider\u0000model`. */
+  private readonly facts = new Map<string, ResolvedFacts>()
 
   /** Serializes every mutation so read-modify-write cannot lose an update. */
   private chain: Promise<unknown> = Promise.resolve()
@@ -248,10 +257,10 @@ export class QueueManager {
   /**
    * Re-read every member's configuration and store what the route reports.
    *
-   * This is the "sync" half of the feature: a model reconfigured in dsh's own
-   * settings (a new context window, a new reasoning level, image support) is
-   * picked up by the queue without the user re-adding the row. Overrides are
-   * left alone — they are the user's explicit intent, not a cache.
+   * This is the only path that refreshes capabilities after a row exists: the
+   * plugin never polls dsh on its own, so a model reconfigured in dsh's own
+   * settings is picked up when the user says so. Overrides are left alone — they
+   * are the user's explicit intent, not a cache.
    * @returns whether any row's snapshot changed.
    */
   async syncConfigs(): Promise<boolean> {
@@ -261,12 +270,49 @@ export class QueueManager {
       const config = await this.resolveConfig(entry.provider, entry.model)
       if (config !== undefined) updates.set(entry.id, config)
     }))
+    return this.persistSnapshots(updates)
+  }
+
+  /**
+   * Read the rows that carry no configuration at all.
+   *
+   * A row added through the page is resolved on the way in, but a row that
+   * predates the `snapshot` field (a document migrated from version 1) loaded as
+   * an empty configuration. That is not a stale value to refresh on a clock — it
+   * is a row nothing has ever been read for, and leaving it empty would make the
+   * route advertise text-only until the user notices and presses sync. One read
+   * per unread row, at boot, is the whole of it.
+   * @returns when every unread row has been attempted.
+   */
+  async readUnresolvedRows(): Promise<void> {
+    const unread = this.state().entries.filter(entry => !isKnownConfig(entry.snapshot))
+    if (unread.length === 0) return
+    const updates = new Map<string, ModelConfig>()
+    await Promise.all(unread.map(async (entry) => {
+      const config = await this.resolveConfig(entry.provider, entry.model)
+      if (config !== undefined) updates.set(entry.id, config)
+    }))
+    await this.persistSnapshots(updates)
+  }
+
+  /**
+   * Write resolved configurations into their rows' snapshots.
+   *
+   * The snapshot is the route's memory across a restart: with it, a boot that
+   * cannot reach a provider still advertises what dsh last declared, instead of
+   * withdrawing capabilities (images first) until someone opens the plugin page.
+   * Only rows whose configuration actually differs are written, so a routine
+   * refresh costs no disk traffic.
+   * @param updates - resolved configurations keyed by entry id.
+   * @returns whether the document changed.
+   */
+  private async persistSnapshots(updates: ReadonlyMap<string, ModelConfig>): Promise<boolean> {
     if (updates.size === 0) return false
     let changed = false
     await this.enqueue((current) => {
       const entries = current.entries.map((entry) => {
         const config = updates.get(entry.id)
-        if (config === undefined) return entry
+        if (config === undefined || sameConfig(entry.snapshot, config)) return entry
         changed = true
         return { ...entry, snapshot: config }
       })
@@ -286,6 +332,9 @@ export class QueueManager {
     const selection = selectEntry(state, now)
     const entries: QueueEntryView[] = state.entries.map((entry) => {
       const resolved = this.memberFacts(entry.provider, entry.model)
+      // `resolved` means "dsh answered for this row in this process", which is
+      // what the page labels as current. It is never taken back on a timer, so a
+      // row is not described as unknown because a poll was slow.
       return {
         id: entry.id,
         provider: entry.provider,
@@ -361,52 +410,46 @@ export class QueueManager {
   }
 
   /**
-   * Resolve one member's complete configuration, using the cache when it is
-   * still fresh.
+   * The last configuration dsh reported for one member.
+   *
+   * This is what the route advertises and what a dispatch plans against. Only a
+   * user action (adding the row, or asking the page to sync) changes it, so the
+   * route's claims do not depend on cache age: the harness refuses `read_image`
+   * unless the route *declares* image input, and a queue that forgot its members
+   * between two polls would fail that tool for reasons the user cannot see.
    * @param provider - member provider route.
    * @param model - member model id.
-   * @returns the resolved facts, or `undefined` when the route refused.
+   * @returns the last known facts, or `undefined` when the route never answered.
    */
   private memberFacts(provider: string, model: string): ModelConfig | undefined {
-    const cached = this.facts.get(`${provider}\u0000${model}`)
-    if (cached !== undefined && cached.expiresAt > this.clock()) return cached.value
-    return undefined
+    return this.facts.get(`${provider}\u0000${model}`)?.value
   }
 
   /**
-   * Resolve and cache one member's complete configuration.
+   * Read one member's complete configuration from dsh.
    *
-   * A route that cannot answer is cached as "unknown" for the same short TTL,
-   * so a page load does not hammer a dead provider while still recovering
-   * quickly once it returns.
+   * Called when a row is added and when the user asks to sync — never on a timer.
+   * The previous value survives a failed read: only a successful resolution
+   * replaces what dsh said, so a route that cannot answer keeps its last known
+   * facts and records the error rather than degrading the queue route.
    * @param provider - member provider route.
    * @param model - member model id.
-   * @returns the facts, or `undefined` when resolution failed.
+   * @returns the resolved facts, or `undefined` when this resolution failed.
    */
   async resolveConfig(provider: string, model: string): Promise<ModelConfig | undefined> {
     const key = `${provider}\u0000${model}`
     try {
       const info = await this.llm.resolveModelInfo(provider, model)
       const value = configFromResolved(info)
-      this.facts.set(key, { expiresAt: this.clock() + MODEL_FACTS_TTL_MS, value })
+      this.facts.set(key, { value })
       return value
     } catch (error: unknown) {
       this.facts.set(key, {
-        expiresAt: this.clock() + MODEL_FACTS_TTL_MS,
-        value: undefined,
+        value: this.facts.get(key)?.value,
         error: error instanceof Error ? error.message : String(error),
       })
       return undefined
     }
-  }
-
-  /**
-   * Warm the capability cache for every member, so the first request does not
-   * have to wait for a cold lookup.
-   * @returns when every member has been attempted.
-   */
-  async warmFacts(): Promise<void> {
-    await Promise.all(this.state().entries.map(entry => this.resolveConfig(entry.provider, entry.model)))
   }
 
   /**
@@ -478,26 +521,4 @@ export class QueueManager {
     }
   }
 
-  /**
-   * Refresh the capability caches for every member whose facts are missing or
-   * have expired, leaving the fresh ones alone.
-   *
-   * The browser polls the queue view, and a view cannot describe a row whose
-   * facts it does not have. Re-resolving every member on every poll would hammer
-   * the providers, so this only pays for the entries that actually went stale.
-   * @returns when the stale members have been attempted.
-   */
-  async ensureFacts(): Promise<void> {
-    await Promise.all(this.state().entries.map(entry => this.memberFacts(entry.provider, entry.model) === undefined
-      ? this.resolveConfig(entry.provider, entry.model)
-      : undefined))
-  }
-
-  /**
-   * Refresh the reasoning-effort and capability caches for every member.
-   * @returns when the refresh finished.
-   */
-  async refreshFacts(): Promise<void> {
-    await this.warmFacts()
-  }
 }

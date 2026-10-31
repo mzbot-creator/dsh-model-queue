@@ -130,11 +130,7 @@ export function registerRoutes(ctx: Context, manager: QueueManager): () => Promi
     )
   }
 
-  // The view describes each row against what dsh last resolved for that model, so
-  // a poll that arrives after the fact cache expired has to re-resolve before
-  // answering. `ensureFacts` only pays for the members that actually went stale.
   register(`${QUEUE_ROUTE}/state`, ['GET'], async () => {
-    await manager.ensureFacts()
     return json(manager.view() satisfies QueueView)
   })
 
@@ -143,9 +139,9 @@ export function registerRoutes(ctx: Context, manager: QueueManager): () => Promi
     return json(catalog)
   })
 
-  // Re-read every member's configuration from dsh. The page calls this when it
-  // opens, and the "Sync from dsh" button calls it on demand, so a model whose
-  // dsh settings changed is picked up without re-adding the row.
+  // Re-read every member's configuration from dsh. This is the only path that
+  // refreshes capabilities after a row exists — the plugin never polls dsh on its
+  // own, so a model reconfigured in dsh is picked up when the user says so.
   register(`${QUEUE_ROUTE}/sync`, ['POST'], async () => {
     await manager.syncConfigs()
     return json(manager.view())

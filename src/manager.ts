@@ -32,7 +32,7 @@ import type {
   QueueView,
 } from './contract.ts'
 import { PROVIDER_ID, QUEUE_MODEL_ID, ROUTE_REASONING_EFFORTS } from './contract.ts'
-import { UNKNOWN_CONFIG, aggregateRouteConfig, applyOverrides, configFromListing, configFromResolved } from './model-config.ts'
+import { UNKNOWN_CONFIG, aggregateRouteConfig, applyOverrides, configFromListing, configFromResolved, isKnownConfig } from './model-config.ts'
 
 /** What the queue route advertises to the loop, derived from the current members. */
 export interface RouteFacts {
@@ -45,21 +45,22 @@ export interface RouteFacts {
 /** Fallback context window when no member could be resolved; conservative on purpose. */
 const FALLBACK_CONTEXT_WINDOW = 128_000
 
-/** How long a resolved-model result counts as *fresh* before it is resolved again. */
-const MODEL_FACTS_TTL_MS = 30_000
-
 /**
- * One cached member resolution.
+ * One member resolution.
  *
- * `value` deliberately outlives `expiresAt`. Expiry means "ask dsh again", never
- * "forget what dsh said": a member's capabilities only change when its
- * declaration in dsh changes, and a lapsed TTL is not such a change. Forgetting
- * the value would make the queue route withdraw capability claims (images first)
- * between two polls, and the harness gates `read_image` on exactly those claims.
+ * A member's configuration is read from dsh at exactly two moments: when the row
+ * is added, and when the user asks the page to sync. Nothing re-reads it on a
+ * clock, because a model that has been configured does not change what it can
+ * accept — and a background refresh that only runs while the page is open is
+ * worse than none, since it makes the route's claims depend on who is looking.
+ *
+ * A value therefore stays valid for the life of the process. There is no expiry
+ * to outlive: forgetting a member between two requests would make the route
+ * withdraw capability claims (images first), and the harness gates `read_image`
+ * on exactly those claims.
  */
-interface CachedFacts {
-  readonly expiresAt: number
-  /** The last resolved facts, or `undefined` when the route never answered. */
+interface ResolvedFacts {
+  /** The resolved facts, or `undefined` when the route never answered. */
   readonly value: ModelConfig | undefined
   /** Why the last resolution failed, for the catalog's diagnostics. */
   readonly error?: string
@@ -67,8 +68,8 @@ interface CachedFacts {
 
 /** The mutable queue service the rest of the plugin talks to. */
 export class QueueManager {
-  /** Cached capability facts per `provider\u0000model`. */
-  private readonly facts = new Map<string, CachedFacts>()
+  /** Last resolved configuration per `provider\u0000model`. */
+  private readonly facts = new Map<string, ResolvedFacts>()
 
   /** Serializes every mutation so read-modify-write cannot lose an update. */
   private chain: Promise<unknown> = Promise.resolve()
@@ -256,10 +257,10 @@ export class QueueManager {
   /**
    * Re-read every member's configuration and store what the route reports.
    *
-   * This is the "sync" half of the feature: a model reconfigured in dsh's own
-   * settings (a new context window, a new reasoning level, image support) is
-   * picked up by the queue without the user re-adding the row. Overrides are
-   * left alone — they are the user's explicit intent, not a cache.
+   * This is the only path that refreshes capabilities after a row exists: the
+   * plugin never polls dsh on its own, so a model reconfigured in dsh's own
+   * settings is picked up when the user says so. Overrides are left alone — they
+   * are the user's explicit intent, not a cache.
    * @returns whether any row's snapshot changed.
    */
   async syncConfigs(): Promise<boolean> {
@@ -270,6 +271,28 @@ export class QueueManager {
       if (config !== undefined) updates.set(entry.id, config)
     }))
     return this.persistSnapshots(updates)
+  }
+
+  /**
+   * Read the rows that carry no configuration at all.
+   *
+   * A row added through the page is resolved on the way in, but a row that
+   * predates the `snapshot` field (a document migrated from version 1) loaded as
+   * an empty configuration. That is not a stale value to refresh on a clock — it
+   * is a row nothing has ever been read for, and leaving it empty would make the
+   * route advertise text-only until the user notices and presses sync. One read
+   * per unread row, at boot, is the whole of it.
+   * @returns when every unread row has been attempted.
+   */
+  async readUnresolvedRows(): Promise<void> {
+    const unread = this.state().entries.filter(entry => !isKnownConfig(entry.snapshot))
+    if (unread.length === 0) return
+    const updates = new Map<string, ModelConfig>()
+    await Promise.all(unread.map(async (entry) => {
+      const config = await this.resolveConfig(entry.provider, entry.model)
+      if (config !== undefined) updates.set(entry.id, config)
+    }))
+    await this.persistSnapshots(updates)
   }
 
   /**
@@ -309,10 +332,9 @@ export class QueueManager {
     const selection = selectEntry(state, now)
     const entries: QueueEntryView[] = state.entries.map((entry) => {
       const resolved = this.memberFacts(entry.provider, entry.model)
-      // `resolved` means "dsh answered for this row within the TTL", which is what
-      // the page labels as current. The value itself is kept past the TTL, so a
-      // row is never described as unknown just because a poll was slow.
-      const fresh = resolved !== undefined && this.factsFresh(entry.provider, entry.model)
+      // `resolved` means "dsh answered for this row in this process", which is
+      // what the page labels as current. It is never taken back on a timer, so a
+      // row is not described as unknown because a poll was slow.
       return {
         id: entry.id,
         provider: entry.provider,
@@ -322,7 +344,7 @@ export class QueueManager {
         remainingMs: Math.max(0, entry.cooldownUntil - now),
         failures: entry.failures,
         ...entry.lastFailure === undefined ? {} : { lastFailure: entry.lastFailure },
-        ...fresh ? { resolved } : {},
+        ...resolved === undefined ? {} : { resolved },
         snapshot: entry.snapshot,
         overrides: entry.overrides,
         effective: applyOverrides(resolved ?? entry.snapshot, entry.overrides),
@@ -388,13 +410,13 @@ export class QueueManager {
   }
 
   /**
-   * The last configuration dsh reported for one member, whatever its age.
+   * The last configuration dsh reported for one member.
    *
-   * This is what the route advertises and what a dispatch plans against. A
-   * lapsed TTL is not a capability change, so it must not withdraw anything: the
-   * harness refuses `read_image` unless the route *declares* image input, and a
-   * queue that forgot its members for one poll interval would fail the tool for
-   * reasons the user cannot see.
+   * This is what the route advertises and what a dispatch plans against. Only a
+   * user action (adding the row, or asking the page to sync) changes it, so the
+   * route's claims do not depend on cache age: the harness refuses `read_image`
+   * unless the route *declares* image input, and a queue that forgot its members
+   * between two polls would fail that tool for reasons the user cannot see.
    * @param provider - member provider route.
    * @param model - member model id.
    * @returns the last known facts, or `undefined` when the route never answered.
@@ -404,24 +426,12 @@ export class QueueManager {
   }
 
   /**
-   * Whether the cached resolution is still fresh enough to describe the member
-   * as resolved *right now*.
-   * @param provider - member provider route.
-   * @param model - member model id.
-   * @returns whether a resolution happened within the TTL.
-   */
-  private factsFresh(provider: string, model: string): boolean {
-    const cached = this.facts.get(`${provider}\u0000${model}`)
-    return cached !== undefined && cached.expiresAt > this.clock()
-  }
-
-  /**
-   * Resolve and cache one member's complete configuration.
+   * Read one member's complete configuration from dsh.
    *
-   * The previous value survives both an expiry and a failed re-resolve: only a
-   * successful resolution replaces what dsh said. A route that cannot answer
-   * keeps its last known facts and records the error, so a momentarily dead
-   * provider cannot degrade the queue route (or `read_image`) for its members.
+   * Called when a row is added and when the user asks to sync — never on a timer.
+   * The previous value survives a failed read: only a successful resolution
+   * replaces what dsh said, so a route that cannot answer keeps its last known
+   * facts and records the error rather than degrading the queue route.
    * @param provider - member provider route.
    * @param model - member model id.
    * @returns the resolved facts, or `undefined` when this resolution failed.
@@ -431,37 +441,15 @@ export class QueueManager {
     try {
       const info = await this.llm.resolveModelInfo(provider, model)
       const value = configFromResolved(info)
-      this.facts.set(key, { expiresAt: this.clock() + MODEL_FACTS_TTL_MS, value })
+      this.facts.set(key, { value })
       return value
     } catch (error: unknown) {
       this.facts.set(key, {
-        expiresAt: this.clock() + MODEL_FACTS_TTL_MS,
         value: this.facts.get(key)?.value,
         error: error instanceof Error ? error.message : String(error),
       })
       return undefined
     }
-  }
-
-  /**
-   * Warm the capability cache for every member, so the first request does not
-   * have to wait for a cold lookup, and record what was resolved in the document.
-   *
-   * Persisting here is what makes a restart harmless: the rows already carry the
-   * snapshot, so a boot whose providers are briefly unreachable still advertises
-   * the capabilities dsh last declared. That matters most for `read_image` — the
-   * harness refuses it unless the route declares image input, and a boot-time
-   * refusal would look like a broken model to the user.
-   * @returns when every member has been attempted and the document is current.
-   */
-  async warmFacts(): Promise<void> {
-    const entries = this.state().entries
-    const updates = new Map<string, ModelConfig>()
-    await Promise.all(entries.map(async (entry) => {
-      const config = await this.resolveConfig(entry.provider, entry.model)
-      if (config !== undefined) updates.set(entry.id, config)
-    }))
-    await this.persistSnapshots(updates)
   }
 
   /**
@@ -533,29 +521,4 @@ export class QueueManager {
     }
   }
 
-  /**
-   * Refresh the capability caches for every member whose facts are missing or
-   * have expired, leaving the fresh ones alone.
-   *
-   * The browser polls the queue view, and a view cannot describe a row whose
-   * facts it does not have. Re-resolving every member on every poll would hammer
-   * the providers, so this only pays for the entries that actually went stale.
-   *
-   * A failed refresh keeps the previous value (see {@link resolveConfig}), so
-   * nothing here can make the route advertise less than it already did.
-   * @returns when the stale members have been attempted.
-   */
-  async ensureFacts(): Promise<void> {
-    await Promise.all(this.state().entries.map(entry => this.factsFresh(entry.provider, entry.model)
-      ? undefined
-      : this.resolveConfig(entry.provider, entry.model)))
-  }
-
-  /**
-   * Refresh the reasoning-effort and capability caches for every member.
-   * @returns when the refresh finished.
-   */
-  async refreshFacts(): Promise<void> {
-    await this.warmFacts()
-  }
 }

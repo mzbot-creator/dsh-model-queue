@@ -101,7 +101,11 @@ export async function apply(ctx: Context, raw?: Partial<Config> | Record<string,
   const store = new QueueStore(queuePathIn(home), logger)
   const manager = new QueueManager(ctx, store, () => Date.now())
   await manager.start()
-  await manager.refreshFacts()
+  // Rows carried over from a version 1 document hold no configuration at all.
+  // Reading them once is not "following dsh": it is the first read those rows
+  // ever get, and without it the route would advertise text-only until the user
+  // happened to press sync.
+  await manager.readUnresolvedRows()
 
   // The document does not carry the cooldown: it is plugin configuration, and a
   // settings edit must apply without rewriting the queued order.
@@ -110,15 +114,6 @@ export async function apply(ctx: Context, raw?: Partial<Config> | Record<string,
   }
 
   logger.info(`model-queue: loaded ${manager.state().entries.length} model(s) from ${store.file}`)
-
-  // Capability facts and reasoning efforts are read through the same cached
-  // path the adapter uses, so a warm route never blocks the first request.
-  ctx.effect(() => {
-    const dispose = manager.subscribe(() => {
-      void manager.refreshFacts()
-    })
-    return () => { dispose() }
-  }, 'model-queue: capability refresh')
 
   const adapter = new QueueAdapter(manager, logger)
   const registration = ctx.llm.registerAdapter([PROVIDER_ID], adapter)

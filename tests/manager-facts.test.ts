@@ -1,10 +1,11 @@
 /**
- * Capability-cache tests: a lapsed TTL must never withdraw what dsh declared.
+ * Capability-reading tests: dsh is read when a row is added or the user syncs,
+ * and the answer then stands.
  *
  * The harness gates `read_image` on the route's `inputModalities`, so a queue
- * route that forgot its members between two polls would refuse images for no
- * visible reason. These tests pin the three ways that could happen: expiry, a
- * failed re-resolve, and a restart with an unreachable provider.
+ * route that forgot its members between two requests would refuse images for no
+ * visible reason. These tests pin that the value has no expiry, that a failed
+ * re-read does not erase it, and that nothing refreshes on its own.
  */
 
 import { test } from 'node:test'
@@ -54,11 +55,12 @@ function fakeStore(entries: QueueEntry[]): {
   }
 }
 
-/** A host whose `llm` answers (or refuses) on demand. */
-function fakeCtx(answer: () => ModelConfig) {
+/** A host whose `llm` answers (or refuses) on demand, counting each read. */
+function fakeCtx(answer: () => ModelConfig, reads: { n: number }) {
   return {
     llm: {
       resolveModelInfo: async (provider: string, model: string) => {
+        reads.n += 1
         const config = answer()
         return {
           provider,
@@ -76,77 +78,97 @@ function fakeCtx(answer: () => ModelConfig) {
 }
 
 /** Build a manager over the given rows and clock. */
-async function manager(entries: QueueEntry[], answer: () => ModelConfig, clock: { t: number }) {
+async function manager(entries: QueueEntry[], answer: () => ModelConfig, clock = { t: 1_000 }) {
   const store = fakeStore(entries)
-  const built = new QueueManager(fakeCtx(answer), store as never, () => clock.t)
+  const reads = { n: 0 }
+  const built = new QueueManager(fakeCtx(answer, reads), store as never, () => clock.t)
   await built.start()
-  return { manager: built, store }
+  return { manager: built, store, reads, clock }
 }
 
-test('a lapsed capability cache keeps advertising images', async () => {
-  const clock = { t: 1_000 }
-  const { manager: queue } = await manager([entry('a')], imageConfig, clock)
-  await queue.warmFacts()
+test('a resolved configuration never expires', async () => {
+  const { manager: queue, clock } = await manager([entry('a')], imageConfig)
+  await queue.resolveConfig('od', 'a')
   assert.deepEqual(queue.routeFacts().inputModalities, ['text', 'image'])
 
-  clock.t += 31_000 // one TTL later, nobody has polled the page
+  clock.t += 24 * 60 * 60 * 1000 // a day later
   assert.deepEqual(queue.routeFacts().inputModalities, ['text', 'image'],
-    'an expired cache must still answer with what dsh last declared')
+    'dsh is not re-read on a clock, so the answer stands')
 })
 
-test('a failed re-resolve keeps the last known capabilities', async () => {
-  const clock = { t: 1_000 }
+test('nothing reads dsh after boot without a user action', async () => {
+  const { manager: queue, reads } = await manager([entry('a')], imageConfig)
+  await queue.view()
+  await queue.catalog()
+  await new Promise(resolve => setTimeout(resolve, 50))
+
+  assert.equal(reads.n, 0, 'boot and page reads must not resolve queued members')
+  assert.deepEqual(queue.routeFacts().inputModalities, ['text'],
+    'with nothing read yet, the route stays conservative')
+})
+
+test('the stored snapshot answers before anything is read', async () => {
+  const { manager: queue } = await manager([entry('a', imageConfig())], imageConfig)
+  assert.deepEqual(queue.routeFacts().inputModalities, ['text', 'image'],
+    'the document is the route\'s memory across a restart')
+})
+
+test('a failed re-read keeps the last known capabilities', async () => {
   let answering = true
   const answer = (): ModelConfig => {
     if (!answering) throw new Error('provider temporarily unavailable')
     return imageConfig()
   }
-  const { manager: queue } = await manager([entry('a')], answer, clock)
-  await queue.warmFacts()
+  const { manager: queue } = await manager([entry('a')], answer)
+  await queue.resolveConfig('od', 'a')
 
-  clock.t += 31_000
   answering = false
-  await queue.ensureFacts() // the stale member is re-resolved and refuses
+  await queue.syncConfigs() // the user asked to sync, and the provider is down
 
   assert.deepEqual(queue.routeFacts().inputModalities, ['text', 'image'],
     'a dead provider must not demote a member the queue already knows')
 })
 
-test('warming records the resolved configuration in the document', async () => {
-  const clock = { t: 1_000 }
-  const { manager: queue, store } = await manager([entry('a')], imageConfig, clock)
-  await queue.warmFacts()
+test('syncing records the resolved configuration in the document', async () => {
+  const { manager: queue, store } = await manager([entry('a')], imageConfig)
+  await queue.syncConfigs()
 
   assert.deepEqual(store.current().entries[0]?.snapshot, imageConfig())
   assert.equal(store.commits(), 1)
 })
 
-test('a second warm with unchanged facts writes nothing', async () => {
-  const clock = { t: 1_000 }
-  const { manager: queue, store } = await manager([entry('a')], imageConfig, clock)
-  await queue.warmFacts()
-  await queue.warmFacts()
+test('a second sync with unchanged facts writes nothing', async () => {
+  const { manager: queue, store } = await manager([entry('a')], imageConfig)
+  await queue.syncConfigs()
+  await queue.syncConfigs()
 
   assert.equal(store.commits(), 1, 'an unchanged snapshot must not rewrite the document')
 })
 
-test('a restart with an unreachable provider still advertises the stored snapshot', async () => {
-  const clock = { t: 1_000 }
-  const answer = (): ModelConfig => { throw new Error('provider not ready yet') }
-  // The row inherited its snapshot from the previous run.
-  const { manager: queue } = await manager([entry('a', imageConfig())], answer, clock)
-  await queue.warmFacts()
-
-  assert.deepEqual(queue.routeFacts().inputModalities, ['text', 'image'],
-    'the document is the route\'s memory across a restart')
-})
-
 test('a row with no facts at all stays conservative', async () => {
-  const clock = { t: 1_000 }
   const answer = (): ModelConfig => { throw new Error('unknown model') }
-  const { manager: queue } = await manager([entry('a')], answer, clock)
-  await queue.warmFacts()
+  const { manager: queue } = await manager([entry('a')], answer)
+  await queue.syncConfigs()
 
   assert.deepEqual(queue.routeFacts().inputModalities, ['text'],
     'knowing nothing must never claim images')
+})
+
+test('a row migrated from a version 1 document is read once at boot', async () => {
+  // Version 1 carried no snapshot, so the row loads as UNKNOWN_CONFIG.
+  const { manager: queue, store, reads } = await manager([entry('a')], imageConfig)
+  assert.deepEqual(queue.routeFacts().inputModalities, ['text'], 'nothing read yet')
+
+  await queue.readUnresolvedRows()
+
+  assert.equal(reads.n, 1, 'the unread row is resolved exactly once')
+  assert.deepEqual(store.current().entries[0]?.snapshot, imageConfig(), 'and the document now remembers it')
+  assert.deepEqual(queue.routeFacts().inputModalities, ['text', 'image'])
+})
+
+test('a second boot does not re-read a row that already has a configuration', async () => {
+  const { manager: queue, reads } = await manager([entry('a', imageConfig())], imageConfig)
+  await queue.readUnresolvedRows()
+
+  assert.equal(reads.n, 0, 'a stored configuration means the row was already read')
 })
